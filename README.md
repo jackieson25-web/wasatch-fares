@@ -5,8 +5,8 @@ emails an alert when a fare drops well below its usual price. After every
 check it also publishes a page showing the lowest price found for each city.
 
 - **Trip:** 10 nights, leaving May 8 – Jun 10, 2027, home by Jun 20
-- **Cities:** Amsterdam, Warsaw, Shanghai, Lima, Buenos Aires
-- **Checks:** 4 times a day on GitHub Actions (1 stop max)
+- **Cities:** Dublin, Warsaw, Shanghai, Lima, Buenos Aires
+- **Checks:** 4 times a day on GitHub Actions (1 stop max, 2 for Shanghai)
 - **Alerts:** Great deal = 25%+ below usual, Rare deal = 40%+ below usual.
   A city stays quiet for 7 days after an alert unless it gets 10% cheaper.
 

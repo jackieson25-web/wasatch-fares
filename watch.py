@@ -35,7 +35,7 @@ STAY_DAYS = int(os.environ.get("STAY_DAYS", "10"))      # trip length in nights
 # code, name, rough normal round trip from SLC (used until each travel month
 # has enough history)
 DESTINATIONS = [
-    ("AMS", "Amsterdam",    1000),
+    ("DUB", "Dublin",        950),
     ("WAW", "Warsaw",       1000),
     ("PVG", "Shanghai",     1100),
     ("LIM", "Lima",          800),
