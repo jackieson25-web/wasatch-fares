@@ -42,7 +42,22 @@ DESTINATIONS = [
     ("EZE", "Buenos Aires", 1250),
 ]
 
-MAX_STOPS = int(os.environ.get("MAX_STOPS", "1"))       # skip 2-3 stop junk itineraries
+MAX_STOPS = 1                 # default: skip 2-3 stop junk itineraries
+CITY_STOPS = {"PVG": 2}       # per-city exceptions (2 stops saved ~$460 to Shanghai in a test)
+
+
+def stops_for(dest):
+    """Max stops for a city. A MAX_STOPS env var (used by test runs) overrides every city."""
+    if os.environ.get("MAX_STOPS"):
+        return int(os.environ["MAX_STOPS"])
+    return CITY_STOPS.get(dest, MAX_STOPS)
+
+
+def stops_label():
+    if os.environ.get("MAX_STOPS"):
+        return f"{os.environ['MAX_STOPS']} stop max"
+    extra = ", ".join(f"{s} for {n}" for c, n, _ in DESTINATIONS if (s := CITY_STOPS.get(c)))
+    return f"{MAX_STOPS} stop max" + (f" ({extra})" if extra else "")
 RARE = float(os.environ.get("RARE_RATIO", "0.60"))      # 40%+ below normal
 GREAT = float(os.environ.get("GREAT_RATIO", "0.75"))    # 25%+ below normal
 REALERT_DAYS = 7          # quiet period per city unless it gets 10% cheaper
@@ -99,7 +114,7 @@ def cheapest_dates(dest, stay):
         try:
             data = api("/api/fares/cheapest-dates", {
                 "origin": HOME, "destination": dest, "stay_days": stay, "market": "US",
-                "max_stops": MAX_STOPS,
+                "max_stops": stops_for(dest),
                 "departure_date_range": {"start": lo.isoformat(), "end": hi.isoformat()},
             })
             out += [(d["departure_date"], d.get("return_date"), float(d["price"]["amount"]))
@@ -123,7 +138,7 @@ def flight_details(dest, depart, ret):
     try:
         data = api("/api/fares/round-trip", {"origin": HOME, "destination": dest, "market": "US",
                                              "departure_date": depart, "return_date": ret,
-                                             "max_stops": MAX_STOPS})
+                                             "max_stops": stops_for(dest)})
         its = sorted(data.get("itineraries", []), key=lambda i: i["price"]["amount"])
         if not its:
             return None, None, link
@@ -235,7 +250,7 @@ def send_email(deals):
                     f"{d['depart']} to {d['ret']}. {d['link']}" + (f"\n  Similar: {others}" if others else ""))
 
     html = f"""<div style="font-family:Helvetica,Arial,sans-serif;max-width:560px;margin:auto;color:#14233a">
-<p style="font-size:15px">Round trip from {HOME}, economy, 1 adult, max {MAX_STOPS} stop. Cheap fares can disappear within hours, so confirm before you book.</p>
+<p style="font-size:15px">Round trip from {HOME}, economy, 1 adult, {stops_label()}. Cheap fares can disappear within hours, so confirm before you book.</p>
 {''.join(cards)}</div>"""
 
     msg = EmailMessage()
@@ -312,7 +327,7 @@ def build_site(c, current):
 
     html = PAGE.format(
         stay=STAY_DAYS, start=pretty(start.isoformat()), end=pretty(end.isoformat()),
-        home_by=pretty(TRIP_END.isoformat()), stops=MAX_STOPS, stamp=stamp, rows="".join(rows),
+        home_by=pretty(TRIP_END.isoformat()), stops=stops_label(), stamp=stamp, rows="".join(rows),
         hours="4 times a day")
     SITE.mkdir(parents=True, exist_ok=True)
     (SITE / "index.html").write_text(html, encoding="utf-8")
@@ -383,7 +398,7 @@ footer .wrap {{ padding-block:20px 28px; color:var(--muted); font-size:.84rem; }
     <h1>{stay} days away, <em>somewhere far</em>, this May or June.</h1>
     <p class="lede">Round-trip fares from Salt Lake City to five cities, checked {hours}. This page shows the lowest price found for each one and updates after every check.</p>
     <div class="facts"><span class="fact">SLC departures</span><span class="fact">{stay} nights</span>
-      <span class="fact">Leave {start} – {end}</span><span class="fact">Home by {home_by}</span><span class="fact">{stops} stop max</span></div>
+      <span class="fact">Leave {start} – {end}</span><span class="fact">Home by {home_by}</span><span class="fact">{stops}</span></div>
   </div>
 </div></header>
 <main><div class="wrap"><section aria-labelledby="low">
@@ -408,7 +423,7 @@ def main():
         log(f"travel window {TRIP_START} to {TRIP_END} has passed; nothing to check")
         return
     log(f"checking {len(DESTINATIONS)} cities from {HOME}: {STAY_DAYS}-night trips leaving "
-        f"{pretty(start.isoformat())} to {pretty(end.isoformat())}, back by {pretty(TRIP_END.isoformat())}, max {MAX_STOPS} stop")
+        f"{pretty(start.isoformat())} to {pretty(end.isoformat())}, back by {pretty(TRIP_END.isoformat())}, {stops_label()}")
     for code, name, seed in DESTINATIONS:
         try:
             dates = cheapest_dates(code, STAY_DAYS)
