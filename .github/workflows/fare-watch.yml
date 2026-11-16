@@ -1,0 +1,64 @@
+name: Fare watch
+
+on:
+  schedule:
+    # 4 times a day (UTC). 13:17 UTC = 6:17am Mountain in winter.
+    - cron: "17 1,7,13,19 * * *"
+  workflow_dispatch: {}   # adds a "Run workflow" button for manual checks
+
+concurrency:
+  group: fare-watch
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write      # publish the lowest-prices page
+  id-token: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Price history lives in the Actions cache between runs.
+      - name: Restore price history
+        uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: fares-db-${{ github.run_id }}
+          restore-keys: fares-db-
+
+      - name: Check fares
+        env:
+          IGNAV_API_KEY: ${{ secrets.IGNAV_API_KEY }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: python watch.py
+
+      - name: Save price history
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: fares-db-${{ github.run_id }}
+
+      - name: Upload page
+        if: hashFiles('site/index.html') != ''
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Publish page
+        id: deploy
+        if: hashFiles('site/index.html') != ''
+        uses: actions/deploy-pages@v4
