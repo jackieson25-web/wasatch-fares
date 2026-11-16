@@ -4,7 +4,12 @@ on:
   schedule:
     # 4 times a day (UTC). 13:17 UTC = 6:17am Mountain in winter.
     - cron: "17 1,7,13,19 * * *"
-  workflow_dispatch: {}   # adds a "Run workflow" button for manual checks
+  workflow_dispatch:      # adds a "Run workflow" button for manual checks
+    inputs:
+      test_max_stops:
+        description: "Test only: max stops to try (leave blank for a normal check). Test runs send no email and don't touch the page."
+        required: false
+        default: ""
 
 concurrency:
   group: fare-watch
@@ -38,6 +43,7 @@ jobs:
           restore-keys: fares-db-
 
       - name: Check fares
+        if: inputs.test_max_stops == ''
         env:
           IGNAV_API_KEY: ${{ secrets.IGNAV_API_KEY }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
@@ -45,8 +51,17 @@ jobs:
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
         run: python watch.py
 
+      - name: Test run (no email, no page)
+        if: inputs.test_max_stops != ''
+        env:
+          IGNAV_API_KEY: ${{ secrets.IGNAV_API_KEY }}
+          MAX_STOPS: ${{ inputs.test_max_stops }}
+          DB_PATH: /tmp/test.db
+          SITE_DIR: /tmp/site
+        run: python watch.py
+
       - name: Save price history
-        if: always()
+        if: always() && inputs.test_max_stops == ''
         uses: actions/cache/save@v4
         with:
           path: data
