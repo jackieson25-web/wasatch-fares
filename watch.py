@@ -297,7 +297,8 @@ def build_site(c, current):
     lows = {r[0]: r[1:] for r in c.execute("SELECT * FROM lows")}
 
     names = {d[0]: d[1] for d in DESTINATIONS}
-    order = sorted((code for code in names if code in lows), key=lambda k: lows[k][0])
+    order = sorted((code for code in names if code in lows),
+                   key=lambda k: current[k][2] if k in current else lows[k][0])
     try:
         from zoneinfo import ZoneInfo
         stamp = today.astimezone(ZoneInfo("America/Denver")).strftime("%a %b %-d, %-I:%M %p MT")
@@ -309,20 +310,21 @@ def build_site(c, current):
     for code in order:
         lp, ldep, lret, found = lows[code]
         cur = current.get(code)
-        if cur:
-            gap = cur[2] - lp
-            now = (f'<span class="now">Today {money(cur[2])}'
-                   + (' · <b>at the low</b>' if gap < 1 else f' · {money(gap)} above low') + '</span>')
-        else:
-            now = '<span class="now">Not checked this time</span>'
-        link = gflights(code, ldep, lret)
+        if cur:                       # big number = today's cheapest fare
+            dep, ret, price = cur
+            low = ('<span class="now"><b>All-time low</b></span>' if price - lp < 1 else
+                   f'<span class="now">All-time low {money(lp)} · {pretty(ldep)} · found {pretty(found)}</span>')
+        else:                         # city failed this check: fall back to the record
+            dep, ret, price = ldep, lret, lp
+            low = '<span class="now">All-time low · not checked this time</span>'
+        link = gflights(code, dep, ret)
         rows.append(f"""
       <li class="row">
         <span class="code">{code}</span>
         <div class="mid"><div class="city">{escape(names[code])}</div>
-          <div class="dates">{pretty(ldep)} – {pretty(lret)} · found {pretty(found)}</div></div>
-        <div class="right"><span class="price">{money(lp)}</span>{now}</div>
-        <a class="check" href="{escape(link)}" target="_blank" rel="noopener">Check these dates on Google Flights</a>
+          <div class="dates">{pretty(dep)} – {pretty(ret)}</div></div>
+        <div class="right"><span class="price">{money(price)}</span>{low}</div>
+        <a class="check" href="{escape(link)}" target="_blank" rel="noopener">Check this fare on Google Flights</a>
       </li>""")
 
     html = PAGE.format(
@@ -396,16 +398,16 @@ footer .wrap {{ padding-block:20px 28px; color:var(--muted); font-size:.84rem; }
   <div>
     <p class="eyebrow">Spring 2027 trip watch</p>
     <h1>{stay} days away, <em>somewhere far</em>, this May or June.</h1>
-    <p class="lede">Round-trip fares from Salt Lake City to five cities, checked {hours}. This page shows the lowest price found for each one and updates after every check.</p>
+    <p class="lede">Round-trip fares from Salt Lake City to five cities, checked {hours}. This page shows today's cheapest fare for each one, next to the lowest ever found, and updates after every check.</p>
     <div class="facts"><span class="fact">SLC departures</span><span class="fact">{stay} nights</span>
       <span class="fact">Leave {start} – {end}</span><span class="fact">Home by {home_by}</span><span class="fact">{stops}</span></div>
   </div>
 </div></header>
 <main><div class="wrap"><section aria-labelledby="low">
-  <div class="head"><h2 id="low">Lowest prices found</h2><span class="stamp">Last checked {stamp}</span></div>
+  <div class="head"><h2 id="low">Current prices</h2><span class="stamp">Last checked {stamp}</span></div>
   <ol class="board">{rows}
   </ol>
-  <p class="note">Each big number is the cheapest {stay}-night round trip seen for that city since tracking started: economy, 1 adult, taxes included. "Today" is the cheapest fare at the latest check. A record low can sell out within hours, so check today's price before you count on it.</p>
+  <p class="note">Each big number is the cheapest {stay}-night round trip for that city at the latest check: economy, 1 adult, taxes included. Below it is the lowest fare seen since tracking started, with its departure date and the day it was found.</p>
 </section></div></main>
 <footer><div class="wrap">Prices are what Ignav reported at the time of each check. Confirm on the booking site before you buy.</div></footer>
 </body></html>
