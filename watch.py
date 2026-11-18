@@ -51,10 +51,10 @@ GROUPS = [
     # Searched as the WAS metro code (1 lookup instead of 2) with BWI thrown out.
     # Prices here are FIXED "normal" fares, not learned from history: roughly what
     # these trips were going for in Nov 2026 checks (DUB $679, WAW $765, CAI $810-941).
-    # An email goes out at 25% under: Dublin <= $525, Warsaw <= $570, Cairo <= $675,
+    # An email goes out at 30% under: Dublin <= $490, Warsaw <= $532, Cairo <= $630,
     # which is true sale territory for the East Coast in May/June.
     dict(key="DC", label="Washington, DC", short="DCA/IAD", origins=["WAS"], exclude=["BWI"],
-         fixed_normal=True, dests=[
+         fixed_normal=True, great=0.70, dests=[
         ("DUB", "Dublin",   700),
         ("WAW", "Warsaw",   760),
         ("CAI", "Cairo",    900),
