@@ -1,0 +1,55 @@
+name: Sale fares
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"     # every 30 minutes
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Test only: check the last 10 days of posts, log results, send no email."
+        type: boolean
+        default: false
+
+concurrency:
+  group: deal-feed
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deals:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Which posts were already handled lives in the Actions cache between runs.
+      - name: Restore seen posts
+        uses: actions/cache/restore@v4
+        with:
+          path: deals-data
+          key: deals-state-${{ github.run_id }}
+          restore-keys: deals-state-
+
+      - name: Check sale fares
+        env:
+          IGNAV_API_KEY: ${{ secrets.IGNAV_API_KEY }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+          MAX_AGE_HOURS: ${{ inputs.dry_run && '240' || '48' }}
+          DEALS_STATE: ${{ inputs.dry_run && '/tmp/state.json' || 'deals-data/state.json' }}
+        run: python deals.py
+
+      - name: Save seen posts
+        if: always() && !inputs.dry_run
+        uses: actions/cache/save@v4
+        with:
+          path: deals-data
+          key: deals-state-${{ github.run_id }}
