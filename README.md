@@ -12,6 +12,16 @@ check it also publishes a page showing the lowest price found for each city.
 - **Alerts:** Great deal = 30%+ below usual; Rare deal = 40%+ below usual.
   A city stays quiet for 7 days after an alert unless it gets 10% cheaper.
 
+## Sale fares (deals.py)
+
+Every 30 minutes, `deals.py` reads The Flight Deal's public feed and keeps
+posts that leave from Salt Lake City or Washington DC (DCA/IAD, not BWI). For each one it
+runs a live Ignav search on the post's sample dates (about 1 request per deal,
+pennies a month) and emails it marked **Confirmed** or **Not confirmed**.
+Posts older than 48 hours are skipped, and each post is emailed once. To test it,
+run the *Sale fares* workflow with "dry run" ticked; that logs the last 10 days of
+matches without emailing.
+
 Change the trip with `TRIP_START`, `TRIP_END` and `STAY_DAYS` near the top of
 `watch.py`, and the home airports and cities with `GROUPS`.
 
