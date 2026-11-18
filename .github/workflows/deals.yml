@@ -9,6 +9,10 @@ on:
         description: "Test only: check the last 10 days of posts, log results, send no email."
         type: boolean
         default: false
+      test_email:
+        description: "Test only: email the latest matching posts to the sending Gmail address only (no one else)."
+        type: boolean
+        default: false
 
 concurrency:
   group: deal-feed
@@ -43,12 +47,12 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
-          MAX_AGE_HOURS: ${{ inputs.dry_run && '240' || '48' }}
-          DEALS_STATE: ${{ inputs.dry_run && '/tmp/state.json' || 'deals-data/state.json' }}
+          TEST_EMAIL: ${{ inputs.test_email && '1' || '' }}
+          MAX_AGE_HOURS: ${{ (inputs.dry_run || inputs.test_email) && '240' || '48' }}
         run: python deals.py
 
       - name: Save seen posts
-        if: always() && !inputs.dry_run
+        if: always() && !inputs.dry_run && !inputs.test_email
         uses: actions/cache/save@v4
         with:
           path: deals-data
