@@ -47,6 +47,9 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
 STATE = Path(os.environ.get("DEALS_STATE", "deals-data/state.json"))
 FEED_FILE = os.environ.get("FEED_FILE")   # testing: read a saved feed instead
 DRY_RUN = os.environ.get("DRY_RUN") == "1"   # testing: log only, no email, no state change
+TEST_EMAIL = os.environ.get("TEST_EMAIL") == "1"   # testing: email current matches to SMTP_USER only
+if TEST_EMAIL:
+    TO = SMTP_USER
 MAX_AGE_HOURS = float(os.environ.get("MAX_AGE_HOURS", MAX_AGE_HOURS))
 UA = "Mozilla/5.0 (personal deal-alert script; checks a public feed every 30 min)"
 
@@ -272,7 +275,7 @@ def mail(text, body, subject):
     msg = EmailMessage()
     msg["From"] = f"Fare Watch <{SMTP_USER or 'fare-watch@localhost'}>"
     msg["To"] = TO
-    msg["Subject"] = subject
+    msg["Subject"] = ("[TEST] " if TEST_EMAIL else "") + subject
     msg.set_content(text)
     if body:
         msg.add_alternative(body, subtype="html")
@@ -327,7 +330,7 @@ def main():
     now = datetime.now(timezone.utc)
     new = []
     for d in items:
-        if d["guid"] in state["seen"]:
+        if d["guid"] in state["seen"] and not TEST_EMAIL:
             continue
         state["seen"][d["guid"]] = now.isoformat()
         if now - d["published"] > timedelta(hours=MAX_AGE_HOURS):
@@ -350,7 +353,7 @@ def main():
             log("dry run: no email sent, nothing marked as seen")
             return
         send_email(new)
-    if not DRY_RUN:
+    if not (DRY_RUN or TEST_EMAIL):
         save_state(state)
 
 
