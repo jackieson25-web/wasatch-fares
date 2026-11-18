@@ -45,14 +45,15 @@ GROUPS = [
         ("EZE", "Buenos Aires", 1250),
     ]),
     # Searched as the WAS metro code (1 lookup instead of 2) with BWI thrown out.
-    # Prices here are FIXED "normal" fares, not learned from history: a typical
-    # 10-night May/June economy round trip from Reagan or Dulles. An email goes out
-    # at 25% under (Dublin <= $638, Warsaw <= $675, Cairo <= $863).
+    # Prices here are FIXED "normal" fares, not learned from history: roughly what
+    # these trips were going for in Nov 2026 checks (DUB $679, WAW $765, CAI $810-941).
+    # An email goes out at 25% under: Dublin <= $525, Warsaw <= $570, Cairo <= $675,
+    # which is true sale territory for the East Coast in May/June.
     dict(key="DC", label="Washington, DC", short="DCA/IAD", origins=["WAS"], exclude=["BWI"],
          fixed_normal=True, dests=[
-        ("DUB", "Dublin",   850),
-        ("WAW", "Warsaw",   900),
-        ("CAI", "Cairo",   1150),
+        ("DUB", "Dublin",   700),
+        ("WAW", "Warsaw",   760),
+        ("CAI", "Cairo",    900),
     ]),
 ]
 
