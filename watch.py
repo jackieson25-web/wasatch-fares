@@ -44,10 +44,15 @@ GROUPS = [
         ("LIM", "Lima",          800),
         ("EZE", "Buenos Aires", 1250),
     ]),
-    dict(key="WAS", label="Washington, DC", short="DCA/IAD", origins=["DCA", "IAD"], dests=[
-        ("DUB", "Dublin",  750),
-        ("WAW", "Warsaw",  850),
-        ("CAI", "Cairo",   950),
+    # Searched as the WAS metro code (1 lookup instead of 2) with BWI thrown out.
+    # Prices here are FIXED "normal" fares, not learned from history: a typical
+    # 10-night May/June economy round trip from Reagan or Dulles. An email goes out
+    # at 25% under (Dublin <= $638, Warsaw <= $675, Cairo <= $863).
+    dict(key="DC", label="Washington, DC", short="DCA/IAD", origins=["WAS"], exclude=["BWI"],
+         fixed_normal=True, dests=[
+        ("DUB", "Dublin",   850),
+        ("WAW", "Warsaw",   900),
+        ("CAI", "Cairo",   1150),
     ]),
 ]
 
@@ -158,20 +163,48 @@ def airport_dates(g, origin, dest, stay):
     return out
 
 
-def flight_details(g, origin, dest, depart, ret):
-    """Airline, stops and a booking link for one date pair (2 API calls)."""
+def round_trip(g, origin, dest, depart, ret):
+    """Cheapest-first itineraries for one date pair, minus any that leave from or
+    come back to an excluded airport (e.g. BWI inside the WAS metro code)."""
+    data = api("/api/fares/round-trip", {"origin": origin, "destination": dest, "market": "US",
+                                         "departure_date": depart, "return_date": ret,
+                                         "max_stops": stops_for(g, dest)})
+    skip = set(g.get("exclude", ()))
+
+    def ok(i):
+        out, back = i["outbound"].get("segments", []), i.get("inbound", {}).get("segments", [])
+        return not ((out and out[0].get("departure_airport") in skip) or
+                    (back and back[-1].get("arrival_airport") in skip))
+    return sorted((i for i in data.get("itineraries", []) if ok(i)), key=lambda i: i["price"]["amount"])
+
+
+def verify(g, dest, dates):
+    """For groups with excluded airports, the date scan can't say which airport a
+    fare is from, so reprice its cheapest date with a full search (1 API call) and
+    keep only allowed airports. Returns ((depart, return, price, airport), itinerary)."""
+    dep, ret, price, _ = min(dates, key=lambda x: x[2])
+    if MOCK:
+        return (dep, ret, round(price * 1.06), "IAD"), None
+    its = round_trip(g, g["origins"][0], dest, dep, ret)
+    if not its:
+        return None, None
+    best = its[0]
+    airport = best["outbound"]["segments"][0].get("departure_airport") or g["origins"][0]
+    return (dep, ret, float(best["price"]["amount"]), airport), best
+
+
+def flight_details(g, origin, dest, depart, ret, best=None):
+    """Airline, stops and a booking link for one date pair (1-2 API calls)."""
     link = gflights(origin, dest, depart, ret)
     if MOCK:
         r = random.Random(dest + depart)
         return r.choice(["Delta", "United", "KLM"]), r.choice([0, 1]), link
     try:
-        data = api("/api/fares/round-trip", {"origin": origin, "destination": dest, "market": "US",
-                                             "departure_date": depart, "return_date": ret,
-                                             "max_stops": stops_for(g, dest)})
-        its = sorted(data.get("itineraries", []), key=lambda i: i["price"]["amount"])
-        if not its:
-            return None, None, link
-        best = its[0]
+        if best is None:
+            its = round_trip(g, origin, dest, depart, ret)
+            if not its:
+                return None, None, link
+            best = its[0]
         segs = best["outbound"].get("segments", [])
         airline = best["outbound"].get("carrier") or (segs[0]["operating_carrier_name"] if segs else None)
         stops = max(0, len(segs) - 1)
@@ -350,7 +383,7 @@ def build_site(c, current):
             else:                         # city failed this check: fall back to the record
                 dep, ret, price, origin = ldep, lret, lp, lorig or g["origins"][0]
                 low = '<span class="now">All-time low · not checked this time</span>'
-            via = f"From {origin} · " if len(g["origins"]) > 1 else ""
+            via = f"From {origin} · " if g["key"] != HOME else ""
             rows.append(f"""
       <li class="row">
         <span class="code">{code}</span>
@@ -449,7 +482,7 @@ footer .wrap {{ padding-block:20px 28px; color:var(--muted); font-size:.84rem; }
 <main><div class="wrap">
   <div class="head"><h2>Current prices</h2><span class="stamp">Last checked {stamp}</span></div>
   {sections}
-  <p class="note">Each big number is the cheapest {stay}-night round trip for that city at the latest check: economy, 1 adult, taxes included. For Washington it's the cheaper of Reagan (DCA) and Dulles (IAD). Below it is the lowest fare seen since tracking started, with its departure date and the day it was found.</p>
+  <p class="note">Each big number is the cheapest {stay}-night round trip for that city at the latest check: economy, 1 adult, taxes included. For Washington it's the cheapest date from Reagan (DCA) or Dulles (IAD), never BWI, checked with a full fare search. Below it is the lowest fare seen since tracking started, with its departure date and the day it was found.</p>
 </div></main>
 <footer><div class="wrap">Prices are what Ignav reported at the time of each check. Confirm on the booking site before you buy.</div></footer>
 </body></html>
@@ -484,8 +517,24 @@ def main():
         c.executemany("INSERT INTO prices(origin, dest, depart, ret, price) VALUES (?,?,?,?,?)",
                       [(g["key"], code, d, r, p) for d, r, p, _ in dates])
         c.commit()
+        best_it = None
+        if g.get("exclude"):
+            try:
+                v, best_it = verify(g, code, dates)
+            except Exception as e:
+                log(f"{g['short']}-{code}: repricing failed: {e}")
+                errors += 1
+                continue
+            if v is None:
+                log(f"{g['short']}-{code}: only {'/'.join(g['exclude'])} fares on the cheapest date, skipping")
+                continue
+            dates = [v]
         current[key] = min(dates, key=lambda x: x[2])
-        ratio, dep, ret, price, origin, normal, trusted = best_deal(c, g["key"], code, seed, dates)
+        if g.get("fixed_normal"):
+            dep, ret, price, origin = current[key]
+            ratio, normal, trusted = price / seed, seed, True
+        else:
+            ratio, dep, ret, price, origin, normal, trusted = best_deal(c, g["key"], code, seed, dates)
         tier = "Rare deal" if ratio <= RARE else "Great deal" if ratio <= GREAT else None
         log(f"{origin}-{code} {city:13} {pretty(dep):10} ${price:>5.0f}  normal ~${normal:>5.0f}{'' if trusted else '*'} "
             f"{round(100 * (1 - ratio)):>3}% off  {tier or ''}")
@@ -496,7 +545,7 @@ def main():
         if prev is not None and price > prev * 0.9:
             log(f"  already alerted at ${prev:.0f} recently, skipping")
             continue
-        airline, stops, link = flight_details(g, origin, code, dep, ret)
+        airline, stops, link = flight_details(g, origin, code, dep, ret, best_it)
         others = sorted([x for x in dates if x[2] <= price * 1.08 and x[0] != dep])[:8]
         found.append(dict(key=key, dest=code, origin=origin, name=name, price=price, normal=round(normal),
                           tier=tier, pct=round(100 * (1 - ratio)), depart=dep, ret=ret, airline=airline,
