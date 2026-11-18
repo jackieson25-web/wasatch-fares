@@ -1,6 +1,6 @@
 """Personal flight-deal watcher.
 
-Checks round-trip fares from Salt Lake City to a few international cities,
+Checks round-trip fares from Salt Lake City and Washington DC to a few cities,
 works out what each route normally costs for that month of travel, and emails
 you when one drops well below that.
 
@@ -32,31 +32,47 @@ TRIP_START = date.fromisoformat(os.environ.get("TRIP_START", "2027-05-08"))
 TRIP_END = date.fromisoformat(os.environ.get("TRIP_END", "2027-06-20"))
 STAY_DAYS = int(os.environ.get("STAY_DAYS", "10"))      # trip length in nights
 
-# code, name, rough normal round trip from SLC (used until each travel month
-# has enough history)
-DESTINATIONS = [
-    ("DUB", "Dublin",        950),
-    ("WAW", "Warsaw",       1000),
-    ("PVG", "Shanghai",     1100),
-    ("LIM", "Lima",          800),
-    ("EZE", "Buenos Aires", 1250),
+# Each group is a set of home airports and the cities watched from them.
+# Destinations: code, name, rough normal round trip (used until each travel
+# month has enough history). A group with several airports takes the cheapest
+# of them for each date.
+GROUPS = [
+    dict(key=HOME, label="Salt Lake City", short="SLC", origins=[HOME], dests=[
+        ("DUB", "Dublin",        950),
+        ("WAW", "Warsaw",       1000),
+        ("PVG", "Shanghai",     1100),
+        ("LIM", "Lima",          800),
+        ("EZE", "Buenos Aires", 1250),
+    ]),
+    dict(key="WAS", label="Washington, DC", short="DCA/IAD", origins=["DCA", "IAD"], dests=[
+        ("DUB", "Dublin",  750),
+        ("WAW", "Warsaw",  850),
+        ("CAI", "Cairo",   950),
+    ]),
 ]
 
 MAX_STOPS = 1                 # default: skip 2-3 stop junk itineraries
-CITY_STOPS = {"PVG": 2}       # per-city exceptions (2 stops saved ~$460 to Shanghai in a test)
+CITY_STOPS = {(HOME, "PVG"): 2}   # per-route exceptions (2 stops saved ~$460 to Shanghai in a test)
 
 
-def stops_for(dest):
-    """Max stops for a city. A MAX_STOPS env var (used by test runs) overrides every city."""
+def rkey(g, dest):
+    """Storage key for a route. SLC routes keep the bare city code so old history still counts."""
+    return dest if g["key"] == HOME else f"{g['key']}-{dest}"
+
+
+def stops_for(g, dest):
+    """Max stops for a route. A MAX_STOPS env var (used by test runs) overrides every route."""
     if os.environ.get("MAX_STOPS"):
         return int(os.environ["MAX_STOPS"])
-    return CITY_STOPS.get(dest, MAX_STOPS)
+    return CITY_STOPS.get((g["key"], dest), MAX_STOPS)
 
 
-def stops_label():
+def stops_label(g=None):
     if os.environ.get("MAX_STOPS"):
         return f"{os.environ['MAX_STOPS']} stop max"
-    extra = ", ".join(f"{s} for {n}" for c, n, _ in DESTINATIONS if (s := CITY_STOPS.get(c)))
+    groups = [g] if g else GROUPS
+    extra = ", ".join(f"{s} for {n}" for gg in groups for c, n, _ in gg["dests"]
+                      if (s := CITY_STOPS.get((gg["key"], c))))
     return f"{MAX_STOPS} stop max" + (f" ({extra})" if extra else "")
 RARE = float(os.environ.get("RARE_RATIO", "0.60"))      # 40%+ below normal
 GREAT = float(os.environ.get("GREAT_RATIO", "0.75"))    # 25%+ below normal
@@ -103,24 +119,38 @@ def departure_window(stay):
     return max(TRIP_START, date.today() + timedelta(days=1)), TRIP_END - timedelta(days=stay)
 
 
-def cheapest_dates(dest, stay):
-    """[(depart, return, price)] for every departure date in the window."""
-    if MOCK:
-        return mock_dates(dest, stay)
+def cheapest_dates(g, dest, seed, stay):
+    """[(depart, return, price, airport)] for every departure date in the window,
+    cheapest of the group's airports for each date."""
+    best, failed = {}, None
+    for origin in g["origins"]:
+        try:
+            for dep, ret, price in (mock_dates(origin, dest, seed, stay) if MOCK
+                                    else airport_dates(g, origin, dest, stay)):
+                if dep not in best or price < best[dep][2]:
+                    best[dep] = (dep, ret, price, origin)
+        except RuntimeError as e:
+            failed = e
+    if not best and failed:
+        raise failed
+    return [best[d] for d in sorted(best)]
+
+
+def airport_dates(g, origin, dest, stay):
     start, end = departure_window(stay)
     out, lo, failed = [], start, None
     while lo <= end:                      # Ignav allows at most 31 dates per request
         hi = min(lo + timedelta(days=30), end)
         try:
             data = api("/api/fares/cheapest-dates", {
-                "origin": HOME, "destination": dest, "stay_days": stay, "market": "US",
-                "max_stops": stops_for(dest),
+                "origin": origin, "destination": dest, "stay_days": stay, "market": "US",
+                "max_stops": stops_for(g, dest),
                 "departure_date_range": {"start": lo.isoformat(), "end": hi.isoformat()},
             })
             out += [(d["departure_date"], d.get("return_date"), float(d["price"]["amount"]))
                     for d in data.get("dates", []) if d.get("status") == "priced" and d.get("price")]
         except RuntimeError as e:         # skip this month, keep the rest
-            log(f"  {dest} {lo:%b %d}-{hi:%b %d} skipped: {str(e)[:120]}")
+            log(f"  {origin}-{dest} {lo:%b %d}-{hi:%b %d} skipped: {str(e)[:120]}")
             failed = e
         lo = hi + timedelta(days=1)
     if not out and failed:
@@ -128,17 +158,16 @@ def cheapest_dates(dest, stay):
     return out
 
 
-def flight_details(dest, depart, ret):
+def flight_details(g, origin, dest, depart, ret):
     """Airline, stops and a booking link for one date pair (2 API calls)."""
-    link = ("https://www.google.com/travel/flights?q=" +
-            quote(f"Flights from {HOME} to {dest} on {depart} returning {ret}"))
+    link = gflights(origin, dest, depart, ret)
     if MOCK:
         r = random.Random(dest + depart)
         return r.choice(["Delta", "United", "KLM"]), r.choice([0, 1]), link
     try:
-        data = api("/api/fares/round-trip", {"origin": HOME, "destination": dest, "market": "US",
+        data = api("/api/fares/round-trip", {"origin": origin, "destination": dest, "market": "US",
                                              "departure_date": depart, "return_date": ret,
-                                             "max_stops": stops_for(dest)})
+                                             "max_stops": stops_for(g, dest)})
         its = sorted(data.get("itineraries", []), key=lambda i: i["price"]["amount"])
         if not its:
             return None, None, link
@@ -160,16 +189,15 @@ def flight_details(dest, depart, ret):
         return None, None, link
 
 
-def mock_dates(dest, stay):
-    seed = {d[0]: d[2] for d in DESTINATIONS}[dest]
+def mock_dates(origin, dest, seed, stay):
     today = date.today()
     start, end = departure_window(stay)
-    rr = random.Random(f"{dest}{today}")
+    rr = random.Random(f"{origin}{dest}{today}")
     sale, depth, at = rr.random() < 0.3, rr.uniform(0.5, 0.8), rr.randint(0, 25)
     out = []
     for i in range((end - start).days + 1):
         d = start + timedelta(days=i)
-        r = random.Random(f"{dest}{d}{today}")
+        r = random.Random(f"{origin}{dest}{d}{today}")
         f = r.uniform(0.93, 1.25)
         if sale and at <= i <= at + 15 and r.random() < 0.6:
             f = depth * r.uniform(0.95, 1.08)
@@ -190,27 +218,27 @@ def db():
     return c
 
 
-def normal_price(c, dest, depart, seed):
+def normal_price(c, group, dest, depart, seed):
     """25th percentile of fares for the same travel month: what you can
     usually get with flexible dates that month. Falls back to the seed price
     until there are MIN_HISTORY_DAYS separate days of data for that month."""
     rows = c.execute("""SELECT price, date(seen) FROM prices WHERE origin=? AND dest=?
                         AND substr(depart,1,7)=? AND seen >= datetime('now', ?)""",
-                     (HOME, dest, depart[:7], f"-{HISTORY_DAYS} days")).fetchall()
+                     (group, dest, depart[:7], f"-{HISTORY_DAYS} days")).fetchall()
     if len({r[1] for r in rows}) >= MIN_HISTORY_DAYS:
         return statistics.quantiles(sorted(r[0] for r in rows), n=4)[0], True
     return seed, False
 
 
-def best_deal(c, code, seed, dates):
-    """Best (ratio, depart, ret, price, normal, trusted) across dates, each
-    judged against the normal price for its own travel month."""
+def best_deal(c, group, code, seed, dates):
+    """Best (ratio, depart, ret, price, airport, normal, trusted) across dates,
+    each judged against the normal price for its own travel month."""
     best = None
-    for dep, ret, price in dates:
-        normal, trusted = normal_price(c, code, dep, seed)
+    for dep, ret, price, origin in dates:
+        normal, trusted = normal_price(c, group, code, dep, seed)
         r = price / normal
         if best is None or r < best[0]:
-            best = (r, dep, ret, price, normal, trusted)
+            best = (r, dep, ret, price, origin, normal, trusted)
     return best
 
 
@@ -236,7 +264,7 @@ def send_email(deals):
         basis = "" if d["trusted"] else " · normal = starting estimate"
         cards.append(f"""
 <div style="border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin:0 0 14px">
-  <div style="font-size:11px;font-weight:bold;letter-spacing:.06em;text-transform:uppercase;color:{color}">{d['tier']} · {HOME} → {d['dest']}</div>
+  <div style="font-size:11px;font-weight:bold;letter-spacing:.06em;text-transform:uppercase;color:{color}">{d['tier']} · {d['origin']} → {d['dest']}</div>
   <div style="font-size:22px;font-weight:bold;margin:4px 0">{escape(d['name'])}</div>
   <div style="font-size:28px;font-weight:bold">${d['price']:.0f}
     <span style="font-size:14px;font-weight:normal;color:#6b7280;text-decoration:line-through">${d['normal']:.0f}</span>
@@ -250,7 +278,7 @@ def send_email(deals):
                     f"{d['depart']} to {d['ret']}. {d['link']}" + (f"\n  Similar: {others}" if others else ""))
 
     html = f"""<div style="font-family:Helvetica,Arial,sans-serif;max-width:560px;margin:auto;color:#14233a">
-<p style="font-size:15px">Round trip from {HOME}, economy, 1 adult, {stops_label()}. Cheap fares can disappear within hours, so confirm before you book.</p>
+<p style="font-size:15px">Round trip, economy, 1 adult, {stops_label()}. Cheap fares can disappear within hours, so confirm before you book.</p>
 {''.join(cards)}</div>"""
 
     msg = EmailMessage()
@@ -287,18 +315,17 @@ def build_site(c, current):
     The lowest-ever record is kept in its own table so it survives price-history cleanup."""
     c.execute("""CREATE TABLE IF NOT EXISTS lows (dest TEXT PRIMARY KEY, price REAL, depart TEXT,
                                                  ret TEXT, found TEXT)""")
+    if "origin" not in [r[1] for r in c.execute("PRAGMA table_info(lows)")]:
+        c.execute("ALTER TABLE lows ADD COLUMN origin TEXT")
     today = datetime.now(timezone.utc)
-    for code, (dep, ret, price) in current.items():
-        row = c.execute("SELECT price FROM lows WHERE dest=?", (code,)).fetchone()
+    for key, (dep, ret, price, origin) in current.items():
+        row = c.execute("SELECT price FROM lows WHERE dest=?", (key,)).fetchone()
         if row is None or price < row[0]:
-            c.execute("INSERT OR REPLACE INTO lows VALUES (?,?,?,?,?)",
-                      (code, price, dep, ret, today.date().isoformat()))
+            c.execute("INSERT OR REPLACE INTO lows(dest, price, depart, ret, found, origin) VALUES (?,?,?,?,?,?)",
+                      (key, price, dep, ret, today.date().isoformat(), origin))
     c.commit()
-    lows = {r[0]: r[1:] for r in c.execute("SELECT * FROM lows")}
+    lows = {r[0]: r[1:] for r in c.execute("SELECT dest, price, depart, ret, found, origin FROM lows")}
 
-    names = {d[0]: d[1] for d in DESTINATIONS}
-    order = sorted((code for code in names if code in lows),
-                   key=lambda k: current[k][2] if k in current else lows[k][0])
     try:
         from zoneinfo import ZoneInfo
         stamp = today.astimezone(ZoneInfo("America/Denver")).strftime("%a %b %-d, %-I:%M %p MT")
@@ -306,39 +333,54 @@ def build_site(c, current):
         stamp = today.strftime("%a %b %d, %H:%M UTC")
     start, end = departure_window(STAY_DAYS)
 
-    rows = []
-    for code in order:
-        lp, ldep, lret, found = lows[code]
-        cur = current.get(code)
-        if cur:                       # big number = today's cheapest fare
-            dep, ret, price = cur
-            low = ('<span class="now"><b>All-time low</b></span>' if price - lp < 1 else
-                   f'<span class="now">All-time low {money(lp)} · {pretty(ldep)} · found {pretty(found)}</span>')
-        else:                         # city failed this check: fall back to the record
-            dep, ret, price = ldep, lret, lp
-            low = '<span class="now">All-time low · not checked this time</span>'
-        link = gflights(code, dep, ret)
-        rows.append(f"""
+    sections = []
+    for g in GROUPS:
+        names = {rkey(g, d[0]): (d[0], d[1]) for d in g["dests"]}
+        order = sorted((k for k in names if k in lows),
+                       key=lambda k: current[k][2] if k in current else lows[k][0])
+        rows = []
+        for key in order:
+            code, name = names[key]
+            lp, ldep, lret, found, lorig = lows[key]
+            cur = current.get(key)
+            if cur:                       # big number = today's cheapest fare
+                dep, ret, price, origin = cur
+                low = ('<span class="now"><b>All-time low</b></span>' if price - lp < 1 else
+                       f'<span class="now">All-time low {money(lp)} · {pretty(ldep)} · found {pretty(found)}</span>')
+            else:                         # city failed this check: fall back to the record
+                dep, ret, price, origin = ldep, lret, lp, lorig or g["origins"][0]
+                low = '<span class="now">All-time low · not checked this time</span>'
+            via = f"From {origin} · " if len(g["origins"]) > 1 else ""
+            rows.append(f"""
       <li class="row">
         <span class="code">{code}</span>
-        <div class="mid"><div class="city">{escape(names[code])}</div>
-          <div class="dates">{pretty(dep)} – {pretty(ret)}</div></div>
+        <div class="mid"><div class="city">{escape(name)}</div>
+          <div class="dates">{via}{pretty(dep)} – {pretty(ret)}</div></div>
         <div class="right"><span class="price">{money(price)}</span>{low}</div>
-        <a class="check" href="{escape(link)}" target="_blank" rel="noopener">Check this fare on Google Flights</a>
+        <a class="check" href="{escape(gflights(origin, code, dep, ret))}" target="_blank" rel="noopener">Check this fare on Google Flights</a>
       </li>""")
+        if not rows:
+            continue
+        hid = g["key"].lower()
+        sections.append(f"""
+<section aria-labelledby="{hid}">
+  <div class="head"><h2 id="{hid}">From {escape(g['label'])} <span class="sub">{escape(g['short'])} · {escape(stops_label(g))}</span></h2></div>
+  <ol class="board">{''.join(rows)}
+  </ol>
+</section>""")
 
     html = PAGE.format(
         stay=STAY_DAYS, start=pretty(start.isoformat()), end=pretty(end.isoformat()),
-        home_by=pretty(TRIP_END.isoformat()), stops=stops_label(), stamp=stamp, rows="".join(rows),
+        home_by=pretty(TRIP_END.isoformat()), stamp=stamp, sections="".join(sections),
         hours="4 times a day")
     SITE.mkdir(parents=True, exist_ok=True)
     (SITE / "index.html").write_text(html, encoding="utf-8")
     log(f"page written to {SITE / 'index.html'}")
 
 
-def gflights(dest, depart, ret):
+def gflights(origin, dest, depart, ret):
     return ("https://www.google.com/travel/flights?q=" +
-            quote(f"Flights from {HOME} to {dest} on {depart} returning {ret}"))
+            quote(f"Flights from {origin} to {dest} on {depart} returning {ret}"))
 
 
 PAGE = """<!doctype html>
@@ -372,7 +414,8 @@ h1 {{ font-size:clamp(2rem,5.5vw,3.1rem); }} h1 em {{ font-style:italic; color:v
 main .wrap {{ padding-block:32px 48px; display:grid; gap:36px; }}
 .head {{ display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:8px 20px; }}
 h2 {{ font-size:1.6rem; }}
-.stamp {{ color:var(--muted); font-size:.9rem; font-variant-numeric:tabular-nums; }}
+section h2 {{ font-size:1.25rem; }}
+.sub {{ font-family:var(--sans); font-size:.85rem; font-weight:500; color:var(--muted); letter-spacing:0; margin-left:6px; }}.stamp {{ color:var(--muted); font-size:.9rem; font-variant-numeric:tabular-nums; }}
 .board {{ list-style:none; margin:14px 0 0; padding:0; background:var(--surface); border:1px solid var(--line); border-radius:14px; overflow:hidden; }}
 .row {{ display:grid; grid-template-columns:64px minmax(0,1fr) auto; gap:4px 18px; align-items:center; padding:18px 20px; border-top:1px solid var(--line); }}
 .row:first-child {{ border-top:0; }}
@@ -398,17 +441,16 @@ footer .wrap {{ padding-block:20px 28px; color:var(--muted); font-size:.84rem; }
   <div>
     <p class="eyebrow">Spring 2027 trip watch</p>
     <h1>{stay} days away, <em>somewhere far</em>, this May or June.</h1>
-    <p class="lede">Round-trip fares from Salt Lake City to five cities, checked {hours}. This page shows today's cheapest fare for each one, next to the lowest ever found, and updates after every check.</p>
-    <div class="facts"><span class="fact">SLC departures</span><span class="fact">{stay} nights</span>
-      <span class="fact">Leave {start} – {end}</span><span class="fact">Home by {home_by}</span><span class="fact">{stops}</span></div>
+    <p class="lede">Round-trip fares from Salt Lake City and from Washington, DC, checked {hours}. This page shows today's cheapest fare for each city, next to the lowest ever found, and updates after every check.</p>
+    <div class="facts"><span class="fact">SLC or DCA/IAD departures</span><span class="fact">{stay} nights</span>
+      <span class="fact">Leave {start} – {end}</span><span class="fact">Home by {home_by}</span></div>
   </div>
 </div></header>
-<main><div class="wrap"><section aria-labelledby="low">
-  <div class="head"><h2 id="low">Current prices</h2><span class="stamp">Last checked {stamp}</span></div>
-  <ol class="board">{rows}
-  </ol>
-  <p class="note">Each big number is the cheapest {stay}-night round trip for that city at the latest check: economy, 1 adult, taxes included. Below it is the lowest fare seen since tracking started, with its departure date and the day it was found.</p>
-</section></div></main>
+<main><div class="wrap">
+  <div class="head"><h2>Current prices</h2><span class="stamp">Last checked {stamp}</span></div>
+  {sections}
+  <p class="note">Each big number is the cheapest {stay}-night round trip for that city at the latest check: economy, 1 adult, taxes included. For Washington it's the cheaper of Reagan (DCA) and Dulles (IAD). Below it is the lowest fare seen since tracking started, with its departure date and the day it was found.</p>
+</div></main>
 <footer><div class="wrap">Prices are what Ignav reported at the time of each check. Confirm on the booking site before you buy.</div></footer>
 </body></html>
 """
@@ -424,37 +466,40 @@ def main():
     if start > end:
         log(f"travel window {TRIP_START} to {TRIP_END} has passed; nothing to check")
         return
-    log(f"checking {len(DESTINATIONS)} cities from {HOME}: {STAY_DAYS}-night trips leaving "
-        f"{pretty(start.isoformat())} to {pretty(end.isoformat())}, back by {pretty(TRIP_END.isoformat())}, {stops_label()}")
-    for code, name, seed in DESTINATIONS:
+    log(f"{STAY_DAYS}-night trips leaving {pretty(start.isoformat())} to {pretty(end.isoformat())}, "
+        f"back by {pretty(TRIP_END.isoformat())}, {stops_label()}")
+    routes = [(g, d) for g in GROUPS for d in g["dests"]]
+    for g, (code, city, seed) in routes:
+        key = rkey(g, code)
+        name = city if g["key"] == HOME else f"{city} from DC"
         try:
-            dates = cheapest_dates(code, STAY_DAYS)
+            dates = cheapest_dates(g, code, seed, STAY_DAYS)
         except Exception as e:
-            log(f"{name}: failed: {e}")
+            log(f"{g['short']}-{code}: failed: {e}")
             errors += 1
             continue
         if not dates:
-            log(f"{name}: no prices returned")
+            log(f"{g['short']}-{code}: no prices returned")
             continue
         c.executemany("INSERT INTO prices(origin, dest, depart, ret, price) VALUES (?,?,?,?,?)",
-                      [(HOME, code, d, r, p) for d, r, p in dates])
+                      [(g["key"], code, d, r, p) for d, r, p, _ in dates])
         c.commit()
-        current[code] = min(dates, key=lambda x: x[2])
-        ratio, dep, ret, price, normal, trusted = best_deal(c, code, seed, dates)
+        current[key] = min(dates, key=lambda x: x[2])
+        ratio, dep, ret, price, origin, normal, trusted = best_deal(c, g["key"], code, seed, dates)
         tier = "Rare deal" if ratio <= RARE else "Great deal" if ratio <= GREAT else None
-        log(f"{name:13} {pretty(dep):10} ${price:>5.0f}  normal ~${normal:>5.0f}{'' if trusted else '*'} "
+        log(f"{origin}-{code} {city:13} {pretty(dep):10} ${price:>5.0f}  normal ~${normal:>5.0f}{'' if trusted else '*'} "
             f"{round(100 * (1 - ratio)):>3}% off  {tier or ''}")
         if not tier:
             continue
         prev = c.execute("SELECT MIN(price) FROM alerts WHERE dest=? AND sent >= datetime('now', ?)",
-                         (code, f"-{REALERT_DAYS} days")).fetchone()[0]
+                         (key, f"-{REALERT_DAYS} days")).fetchone()[0]
         if prev is not None and price > prev * 0.9:
             log(f"  already alerted at ${prev:.0f} recently, skipping")
             continue
-        airline, stops, link = flight_details(code, dep, ret)
+        airline, stops, link = flight_details(g, origin, code, dep, ret)
         others = sorted([x for x in dates if x[2] <= price * 1.08 and x[0] != dep])[:8]
-        found.append(dict(dest=code, name=name, price=price, normal=round(normal), tier=tier,
-                          pct=round(100 * (1 - ratio)), depart=dep, ret=ret, airline=airline,
+        found.append(dict(key=key, dest=code, origin=origin, name=name, price=price, normal=round(normal),
+                          tier=tier, pct=round(100 * (1 - ratio)), depart=dep, ret=ret, airline=airline,
                           stops=stops, link=link, others=others, trusted=trusted))
 
     try:
@@ -465,13 +510,13 @@ def main():
     if found:
         found.sort(key=lambda d: -d["pct"])
         if send_email(found):
-            c.executemany("INSERT INTO alerts(dest, price) VALUES (?,?)", [(d["dest"], d["price"]) for d in found])
+            c.executemany("INSERT INTO alerts(dest, price) VALUES (?,?)", [(d["key"], d["price"]) for d in found])
     else:
         log("no new deals")
     c.execute("DELETE FROM prices WHERE seen < datetime('now', ?)", (f"-{HISTORY_DAYS} days",))
     c.commit()
     c.close()
-    if errors == len(DESTINATIONS):
+    if errors == len(routes):
         sys.exit("every route failed")
 
 
