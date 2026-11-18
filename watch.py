@@ -37,12 +37,16 @@ STAY_DAYS = int(os.environ.get("STAY_DAYS", "10"))      # trip length in nights
 # month has enough history). A group with several airports takes the cheapest
 # of them for each date.
 GROUPS = [
-    dict(key=HOME, label="Salt Lake City", short="SLC", origins=[HOME], dests=[
-        ("DUB", "Dublin",        950),
-        ("WAW", "Warsaw",       1000),
-        ("PVG", "Shanghai",     1100),
-        ("LIM", "Lima",          800),
-        ("EZE", "Buenos Aires", 1250),
+    # FIXED "normal" fares: roughly what each trip went for in Nov 2026 checks.
+    # An email goes out at 30% under: Dublin <= $508, Warsaw <= $595,
+    # Shanghai <= $700, Lima <= $700, Buenos Aires <= $928.
+    dict(key=HOME, label="Salt Lake City", short="SLC", origins=[HOME], fixed_normal=True,
+         great=0.70, dests=[
+        ("DUB", "Dublin",        725),
+        ("WAW", "Warsaw",        850),
+        ("PVG", "Shanghai",     1000),
+        ("LIM", "Lima",         1000),
+        ("EZE", "Buenos Aires", 1325),
     ]),
     # Searched as the WAS metro code (1 lookup instead of 2) with BWI thrown out.
     # Prices here are FIXED "normal" fares, not learned from history: roughly what
@@ -536,7 +540,7 @@ def main():
             ratio, normal, trusted = price / seed, seed, True
         else:
             ratio, dep, ret, price, origin, normal, trusted = best_deal(c, g["key"], code, seed, dates)
-        tier = "Rare deal" if ratio <= RARE else "Great deal" if ratio <= GREAT else None
+        tier = "Rare deal" if ratio <= RARE else "Great deal" if ratio <= g.get("great", GREAT) else None
         log(f"{origin}-{code} {city:13} {pretty(dep):10} ${price:>5.0f}  normal ~${normal:>5.0f}{'' if trusted else '*'} "
             f"{round(100 * (1 - ratio)):>3}% off  {tier or ''}")
         if not tier:
