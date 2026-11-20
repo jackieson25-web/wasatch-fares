@@ -22,6 +22,8 @@ from html import escape
 from pathlib import Path
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+import price_guard
 from urllib.error import HTTPError
 import xml.etree.ElementTree as ET
 
@@ -156,6 +158,17 @@ def post_details(page):
 
 
 # ---------------------------------------------------------------- Ignav check
+_ignav_ok = None
+
+
+def ignav_allowed():
+    """Checked once per run, only when a deal needs it. watch.py sends the price email."""
+    global _ignav_ok
+    if _ignav_ok is None:
+        _ignav_ok = bool(API_KEY) and price_guard.allowed(STATE.parent, notify=False)
+    return _ignav_ok
+
+
 def ignav_price(origin, dest, depart, ret):
     """Cheapest live round-trip fare for the sample dates (1 billed request), or None."""
     body = {"origin": origin, "destination": dest, "market": "US",
@@ -200,7 +213,7 @@ def check(deal):
 
     if not (deal["origin"] and dest and deal["depart"]):
         deal["verdict"] = "unchecked"
-    elif not API_KEY:
+    elif not ignav_allowed():
         deal["verdict"] = "unchecked"
     else:
         try:

@@ -22,6 +22,8 @@ from html import escape
 from pathlib import Path
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+
+import price_guard
 from urllib.error import HTTPError
 
 # ---------------------------------------------------------------- settings
@@ -499,6 +501,9 @@ footer .wrap {{ padding-block:20px 28px; color:var(--muted); font-size:.84rem; }
 def main():
     if not MOCK and not API_KEY:
         sys.exit("Set IGNAV_API_KEY (or MOCK=1 to test).")
+    if not MOCK and not price_guard.allowed(DB.parent):
+        log("Ignav price check failed, so no fares were checked this run (see price guard line above)")
+        return
     c = db()
     found, errors, current = [], 0, {}
     start, end = departure_window(STAY_DAYS)

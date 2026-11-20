@@ -12,6 +12,13 @@ check it also publishes a page showing the lowest price found for each city.
 - **Alerts:** Great deal = 30%+ below usual; Scorching deal = 50%+ below usual (🔥 in the email subject).
   A city stays quiet for 7 days after an alert unless it gets 10% cheaper.
 
+## Ignav price guard (price_guard.py)
+
+Before any Ignav call, both scripts read https://ignav.com/pricing. If the price is
+above the approved $2.00 per 1,000 requests (`APPROVED_PER_1K` in `price_guard.py`),
+or the price can't be read, they make **no Ignav calls** and Jack is emailed. Calls
+resume only after the approved price is raised to match.
+
 ## Sale fares (deals.py)
 
 Every 30 minutes, `deals.py` reads The Flight Deal's public feed and keeps
