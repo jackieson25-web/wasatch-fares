@@ -51,7 +51,9 @@ TEST_EMAIL = os.environ.get("TEST_EMAIL") == "1"   # testing: email current matc
 if TEST_EMAIL:
     TO = SMTP_USER
 MAX_AGE_HOURS = float(os.environ.get("MAX_AGE_HOURS", MAX_AGE_HOURS))
-UA = "Mozilla/5.0 (personal deal-alert script; checks a public feed every 30 min)"
+# The Flight Deal's Cloudflare started 403-ing script user agents on 2026-11-20; Jack chose a browser UA.
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 
 MONTHS = {m: i for i, m in enumerate(
     "january february march april may june july august september october november december".split(), 1)}
