@@ -84,7 +84,7 @@ def stops_label(g=None):
     extra = ", ".join(f"{s} for {n}" for gg in groups for c, n, _ in gg["dests"]
                       if (s := CITY_STOPS.get((gg["key"], c))))
     return f"{MAX_STOPS} stop max" + (f" ({extra})" if extra else "")
-RARE = float(os.environ.get("RARE_RATIO", "0.60"))      # 40%+ below normal
+SCORCHING = float(os.environ.get("SCORCHING_RATIO", "0.50"))   # 50%+ below normal (replaced 40% "Rare" 11-20)
 GREAT = float(os.environ.get("GREAT_RATIO", "0.75"))    # 25%+ below normal
 REALERT_DAYS = 7          # quiet period per city unless it gets 10% cheaper
 HISTORY_DAYS = 120
@@ -289,16 +289,17 @@ def pretty(iso):
 def send_email(deals):
     if len(deals) == 1:
         d = deals[0]
-        subject = f"✈ {d['name']} ${d['price']:.0f} round trip (usually ~${d['normal']:.0f})"
+        subject = f"{'🔥 SCORCHING: ' if d['tier'] == 'Scorching deal' else '✈ '}{d['name']} ${d['price']:.0f} round trip (usually ~${d['normal']:.0f})"
     else:
-        subject = f"✈ {len(deals)} flight deals: " + ", ".join(f"{d['name']} ${d['price']:.0f}" for d in deals[:4])
+        hot = any(d["tier"] == "Scorching deal" for d in deals)
+        subject = f"{'🔥 SCORCHING: ' if hot else '✈ '}{len(deals)} flight deals: " + ", ".join(f"{d['name']} ${d['price']:.0f}" for d in deals[:4])
 
     cards, text = [], []
     for d in deals:
         stops = "" if d["stops"] is None else (" · Nonstop" if d["stops"] == 0 else f" · {d['stops']} stop{'s' if d['stops'] > 1 else ''}")
         airline = f" · {escape(d['airline'])}" if d["airline"] else ""
         others = ", ".join(f"{pretty(o[0])} (${o[2]:.0f})" for o in d["others"][:5])
-        color = "#b4232c" if d["tier"] == "Rare deal" else "#9a5b00"
+        color = "#b4232c" if d["tier"] == "Scorching deal" else "#9a5b00"
         basis = "" if d["trusted"] else " · normal = starting estimate"
         cards.append(f"""
 <div style="border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin:0 0 14px">
@@ -540,7 +541,7 @@ def main():
             ratio, normal, trusted = price / seed, seed, True
         else:
             ratio, dep, ret, price, origin, normal, trusted = best_deal(c, g["key"], code, seed, dates)
-        tier = "Rare deal" if ratio <= RARE else "Great deal" if ratio <= g.get("great", GREAT) else None
+        tier = "Scorching deal" if ratio <= SCORCHING else "Great deal" if ratio <= g.get("great", GREAT) else None
         log(f"{origin}-{code} {city:13} {pretty(dep):10} ${price:>5.0f}  normal ~${normal:>5.0f}{'' if trusted else '*'} "
             f"{round(100 * (1 - ratio)):>3}% off  {tier or ''}")
         if not tier:
