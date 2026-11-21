@@ -110,6 +110,26 @@ def home_of(place):
     return None
 
 
+# Jack, 2026-11-21: no pings for US deals (e.g. DC-California), international only.
+US_STATES = {s.lower() for s in """Alabama Alaska Arizona Arkansas California Colorado Connecticut Delaware Florida
+Hawaii Idaho Illinois Indiana Iowa Kansas Kentucky Louisiana Maine Maryland Massachusetts Michigan
+Minnesota Mississippi Missouri Montana Nebraska Nevada Ohio Oklahoma Oregon Pennsylvania Tennessee Texas Utah
+Vermont Virginia Washington Wisconsin Wyoming""".split()} | {
+    "new hampshire", "new jersey", "new mexico", "new york", "north carolina", "north dakota",
+    "rhode island", "south carolina", "south dakota", "west virginia", "d.c.", "dc", "washington d.c."}
+
+
+GEORGIA_US = {"atlanta", "savannah", "augusta", "columbus", "macon", "albany", "brunswick", "valdosta"}
+
+
+def is_us(place):
+    """'Los Angeles, California' / 'New York' / 'Washington D.C.' -> True."""
+    parts = [x.strip().lower() for x in place.split(",")]
+    if parts[-1] == "georgia":         # the US state or the country (Tbilisi, Georgia)
+        return parts[0] in GEORGIA_US
+    return parts[-1] in US_STATES or parts[0] in US_STATES or home_of(place) is not None
+
+
 def matches(d):
     """Is this deal from one of our cities? 'X - Salt Lake City (and vice versa)'
     counts too, since it can be booked starting from SLC."""
@@ -354,6 +374,9 @@ def main():
             continue
         home, reverse = matches(d)
         if not home:
+            continue
+        if is_us(d["frm"] if reverse else d["to"]):
+            log(f"skipped (US destination): {d['title']}")
             continue
         d.update(home=home, reverse=reverse)
         log(f"match: {d['title']}")
