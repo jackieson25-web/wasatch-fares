@@ -32,7 +32,11 @@ HOME = os.environ.get("HOME_AIRPORT", "SLC")
 # Travel window: the whole trip (out and back) must fall between these dates.
 TRIP_START = date.fromisoformat(os.environ.get("TRIP_START", "2027-05-08"))
 TRIP_END = date.fromisoformat(os.environ.get("TRIP_END", "2027-06-20"))
-STAY_DAYS = int(os.environ.get("STAY_DAYS", "10"))      # trip length in nights
+STAY_DAYS = int(os.environ.get("STAY_DAYS", "10"))      # main trip length, checked every run
+# Other lengths (Jack, 11-21: 9-12 nights) are checked once a day, on the first run of each
+# Mountain-time day, and reused by the day's other runs (~48 extra requests a day).
+STAYS = sorted({STAY_DAYS, *[int(x) for x in os.environ.get("FLEX_STAYS", "9,11,12").split(",") if x]})
+FLEX_MAX_AGE_HOURS = 36   # use once-a-day prices this long, in case a day's flex check fails
 
 # Each group is a set of home airports and the cities watched from them.
 # Destinations: code, name, rough normal round trip (used until each travel
@@ -111,6 +115,17 @@ DIGEST_WEEKDAY = 6        # Sunday (Mountain time): weekly summary email
 DIGEST_HOUR = 6           # first run on Sunday at/after 6 AM MT sends it
 PAGE_URL = "https://jackieson25-web.github.io/wasatch-fares/"
 STALE_HOURS = 12          # page shows a warning if it hasn't updated in this long
+
+# Rising-price warning: email when a city is this far above its 14-day low (after 7 days of data).
+CLIMB_MIN = 60            # $ per person...
+CLIMB_PCT = 0.08          # ...or 8%, whichever is bigger
+CLIMB_REPEAT_DAYS = 7     # then quiet for a week unless it climbs another $50
+CLIMB_STEP = 50
+
+# Two-city trips: fly into one city, home from the other (you get between them yourselves).
+# Checked once a day on the 3 cheapest dates of the first city's round trips (~18 requests a day).
+OPEN_JAW = [(HOME, "DUB", "WAW"), (HOME, "LIM", "EZE"), ("DC", "DUB", "WAW")]
+OPEN_JAW_DATES = 3
 # Test mode: fresh prices, then ONLY the weekly summary, sent to SMTP_USER alone with [TEST].
 TEST_DIGEST = os.environ.get("TEST_DIGEST") == "1"
 
@@ -121,6 +136,13 @@ def log(*a):
 
 def per_person(amount):
     return float(amount) / ADULTS
+
+
+def nights(dep, ret):
+    return (date.fromisoformat(ret) - date.fromisoformat(dep)).days
+
+
+STAY_LABEL = f"{STAYS[0]}–{STAYS[-1]}" if len(STAYS) > 1 else str(STAY_DAYS)
 
 
 # ---------------------------------------------------------------- fare data
@@ -279,6 +301,11 @@ def db():
     CREATE TABLE IF NOT EXISTS snapshots (dest TEXT, price REAL, depart TEXT, origin TEXT,
                                           seen TEXT DEFAULT (datetime('now')));
     CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
+    -- latest price for every departure date and trip length (feeds the date grid + flex lengths)
+    CREATE TABLE IF NOT EXISTS calendar (dest TEXT, depart TEXT, ret TEXT, price REAL, origin TEXT,
+                                         seen TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS openjaw (combo TEXT PRIMARY KEY, depart TEXT, ret TEXT, price REAL,
+                                        origin TEXT, rt_price REAL, seen TEXT DEFAULT (datetime('now')));
     """)
     return c
 
@@ -336,7 +363,7 @@ def send_email(deals):
     <span style="font-size:14px;font-weight:normal;color:#6b7280;text-decoration:line-through">${d['normal']:.0f}</span>
     <span style="font-size:14px;color:#1f7a4d">{d['pct']}% off</span>
     <span style="font-size:12px;font-weight:normal;color:#6b7280">{basis}</span></div>
-  <div style="color:#374151;margin:6px 0 10px;font-size:14px">{money(d['price'] * ADULTS)} total for {ADULTS} · {pretty(d['depart'])} – {pretty(d['ret'])}{airline}{stops}</div>
+  <div style="color:#374151;margin:6px 0 10px;font-size:14px">{money(d['price'] * ADULTS)} total for {ADULTS} · {pretty(d['depart'])} – {pretty(d['ret'])} ({nights(d['depart'], d['ret'])} nights){airline}{stops}</div>
   {f'<div style="font-size:13px;color:#374151;margin:0 0 12px">Similar prices: {others}</div>' if others else ''}
   <a href="{escape(d['link'])}" style="display:inline-block;background:#14233a;color:#fff;font-weight:bold;text-decoration:none;padding:10px 16px;border-radius:8px">Check this fare →</a>
 </div>""")
@@ -454,12 +481,23 @@ def send_digest(c, current):
         if rows:
             sections.append(f'<h3 style="font-size:15px;margin:18px 0 8px">From {escape(g["label"])}</h3>'
                             + "".join(r[1] for r in sorted(rows, key=lambda r: r[0])))
+    oj = []
+    for row in c.execute("SELECT combo, depart, ret, price, origin FROM openjaw WHERE seen >= datetime('now', '-3 days') ORDER BY price"):
+        combo, dep, ret, price, origin = row
+        gkey, pair = combo.split(":")
+        into, home_from = pair.split("-")
+        oj.append(card(f"Into {into}, home from {home_from} · {money(price)} per person",
+                       [f"{money(price * ADULTS)} for {ADULTS} · {pretty(dep)} – {pretty(ret)} from {origin}"],
+                       gflights_multi(origin, into, home_from, dep, ret), "#e9a23b"))
+        text.append(f"Two-city {gkey} into {into}, home from {home_from}: ${price:.0f} pp")
+    if oj:
+        sections.append('<h3 style="font-size:15px;margin:18px 0 8px">Two-city trips</h3>' + "".join(oj))
     if not sections:
         return False
     downs, ups = sum(1 for d in moved if d <= -5), sum(1 for d in moved if d >= 5)
     subject = f"🗓 Weekly fares: {downs} down, {ups} up this week" if moved else "🗓 Weekly fares summary"
     html = f"""<div style="font-family:Helvetica,Arial,sans-serif;max-width:560px;margin:auto;color:#14233a">
-<p style="font-size:15px">Your weekly look at {STAY_DAYS}-night round trips for {ADULTS}, prices per person. Green edge = cheaper than a week ago, red = pricier, gray = flat or too new to tell.</p>
+<p style="font-size:15px">Your weekly look at {STAY_LABEL}-night round trips for {ADULTS}, prices per person. Green edge = cheaper than a week ago, red = pricier, gray = flat or too new to tell.</p>
 {''.join(sections)}<p style="font-size:13px;margin-top:16px"><a href="{PAGE_URL}">See the trend charts →</a></p></div>"""
     return deliver(subject, "\n".join(text) + f"\n\n{PAGE_URL}", html)
 
@@ -515,6 +553,218 @@ def sparkline(series, now_price):
             f'<div class="trend">{n}-day range {money(lo)}–{money(hi)}</div>')
 
 
+def meta_get(c, k):
+    row = c.execute("SELECT v FROM meta WHERE k=?", (k,)).fetchone()
+    return row[0] if row else None
+
+
+def meta_set(c, k, v):
+    c.execute("INSERT OR REPLACE INTO meta(k, v) VALUES (?, ?)", (k, v))
+
+
+def save_calendar(c, key, stay, rows):
+    """Replace one trip length's dates for a city with this run's prices."""
+    c.execute("DELETE FROM calendar WHERE dest=? AND CAST(julianday(ret) - julianday(depart) AS INTEGER)=?",
+              (key, stay))
+    c.executemany("INSERT INTO calendar(dest, depart, ret, price, origin) VALUES (?,?,?,?,?)",
+                  [(key, d, r, p, o) for d, r, p, o in rows])
+
+
+def calendar_rows(c, key):
+    """[(depart, return, price, airport)] for every date and length priced recently."""
+    return [tuple(r) for r in c.execute(
+        "SELECT depart, ret, price, origin FROM calendar WHERE dest=? AND seen >= datetime('now', ?)",
+        (key, f"-{FLEX_MAX_AGE_HOURS} hours"))]
+
+
+def find_climbs(c, current, names):
+    """Cities now well above their 14-day low: waiting has stopped paying off, for now."""
+    out = []
+    for key, (dep, ret, price, origin) in current.items():
+        days = c.execute("SELECT COUNT(DISTINCT date(seen)) FROM snapshots WHERE dest=?", (key,)).fetchone()[0]
+        if days < NEW_LOW_MIN_DAYS:
+            continue
+        low = c.execute("""SELECT price, date(seen) FROM snapshots WHERE dest=? AND seen >= datetime('now', '-14 days')
+                           ORDER BY price LIMIT 1""", (key,)).fetchone()
+        if not low or price - low[0] < max(CLIMB_MIN, CLIMB_PCT * low[0]):
+            continue
+        last = meta_get(c, f"climb:{key}")
+        if last:
+            lp, ld = last.split("|")
+            recent = date.fromisoformat(ld) > date.today() - timedelta(days=CLIMB_REPEAT_DAYS)
+            if recent and price < float(lp) + CLIMB_STEP:
+                continue
+        name, code = names[key]
+        log(f"price climbing: {name} ${price:.0f} pp vs 14-day low ${low[0]:.0f} on {low[1]}")
+        out.append(dict(key=key, name=name, price=price, low=low[0], low_day=low[1], depart=dep, ret=ret,
+                        origin=origin, link=gflights(origin, code, dep, ret)))
+    return out
+
+
+def send_climbs(c, climbs):
+    if len(climbs) == 1:
+        d = climbs[0]
+        subject = f"📈 {d['name']} is climbing: {money(d['price'])} per person, up {money(d['price'] - d['low'])}"
+    else:
+        subject = f"📈 {len(climbs)} cities climbing: " + ", ".join(
+            f"{d['name']} +{money(d['price'] - d['low'])}" for d in climbs[:4])
+    cards, text = [], []
+    for d in climbs:
+        up = d["price"] - d["low"]
+        cards.append(card(escape(d["name"]), [
+            f"<b>{money(d['price'])} per person</b> · {money(d['price'] * ADULTS)} for {ADULTS}",
+            f"Up {money(up)} ({round(100 * up / d['low'])}%) from {money(d['low'])} on {pretty(d['low_day'])}",
+            f"Cheapest now: {pretty(d['depart'])} – {pretty(d['ret'])} ({nights(d['depart'], d['ret'])} nights) from {d['origin']}"],
+            d["link"], "#b4232c"))
+        text.append(f"{d['name']}: ${d['price']:.0f} pp, up ${up:.0f} from ${d['low']:.0f} on {d['low_day']}. {d['link']}")
+    html = f"""<div style="font-family:Helvetica,Arial,sans-serif;max-width:560px;margin:auto;color:#14233a">
+<p style="font-size:15px">These cities have risen well above their lowest price of the last 2 weeks. Fares usually climb as the trip gets closer, so if one of these is your pick, waiting may no longer pay off.</p>
+{''.join(cards)}<p style="font-size:13px"><a href="{PAGE_URL}">See the trend charts →</a></p></div>"""
+    if deliver(subject, "\n\n".join(text) + f"\n\n{PAGE_URL}", html):
+        for d in climbs:
+            meta_set(c, f"climb:{d['key']}", f"{d['price']:.2f}|{date.today().isoformat()}")
+        c.commit()
+
+
+def open_jaw_search(g, into, home_from, dep, ret):
+    """Cheapest per-person fare: home -> `into` on dep, `home_from` -> home on ret. (1 request)"""
+    stops = max(stops_for(g, into), stops_for(g, home_from))
+    data = api("/api/fares/search", {"market": "US", "adults": ADULTS, "legs": [
+        {"origin": g["origins"][0], "destination": into, "departure_date": dep, "max_stops": stops},
+        {"origin": home_from, "destination": g["origins"][0], "departure_date": ret, "max_stops": stops}]})
+    skip = set(g.get("exclude", ()))
+    best = None
+    for it in data.get("itineraries", []):
+        legs = it.get("legs") or []
+        if not legs or not it.get("price"):
+            continue
+        first, last = legs[0].get("segments") or [{}], legs[-1].get("segments") or [{}]
+        if first[0].get("departure_airport") in skip or last[-1].get("arrival_airport") in skip:
+            continue
+        price = per_person(it["price"]["amount"])
+        if best is None or price < best[0]:
+            best = (price, first[0].get("departure_airport") or g["origins"][0])
+    return best
+
+
+def check_open_jaws(c, current):
+    """Once a day: both directions of each city pair, on the first city's cheapest dates."""
+    for gkey, a, b in OPEN_JAW:
+        g = next(x for x in GROUPS if x["key"] == gkey)
+        for into, home_from in ((a, b), (b, a)):
+            combo = f"{gkey}:{into}-{home_from}"
+            rt = sorted(calendar_rows(c, rkey(g, into)), key=lambda x: x[2])
+            seen_deps, tries = set(), []
+            for dep, ret, price, _ in rt:
+                if dep not in seen_deps:
+                    seen_deps.add(dep)
+                    tries.append((dep, ret, price))
+                if len(tries) == OPEN_JAW_DATES:
+                    break
+            best = None
+            for dep, ret, rt_price in tries:
+                if MOCK:
+                    r = random.Random(combo + dep)
+                    res = (round(rt_price * r.uniform(0.95, 1.3)), g["origins"][0] if gkey == HOME else "IAD")
+                else:
+                    try:
+                        res = open_jaw_search(g, into, home_from, dep, ret)
+                    except RuntimeError as e:
+                        log(f"  two-city {combo} {dep}: {str(e)[:120]}")
+                        continue
+                if res and (best is None or res[0] < best[2]):
+                    best = (dep, ret, res[0], res[1])
+            if best:
+                rt_now = current.get(rkey(g, into), (None, None, None))[2]
+                c.execute("INSERT OR REPLACE INTO openjaw(combo, depart, ret, price, origin, rt_price, seen) "
+                          "VALUES (?,?,?,?,?,?, datetime('now'))", (combo, *best, rt_now))
+                log(f"two-city {combo}: ${best[2]:.0f} pp {best[0]}..{best[1]}"
+                    + (f" (round trip to {into} ${rt_now:.0f})" if rt_now else ""))
+    c.commit()
+
+
+def gflights_multi(origin, into, home_from, depart, ret):
+    return ("https://www.google.com/travel/flights?q=" +
+            quote(f"Flights from {origin} to {into} on {depart} and from {home_from} to {origin} on {ret} "
+                  f"for {ADULTS} adults"))
+
+
+# Sequential ramp (one hue): darker green = cheaper. Light/dark mode steps, text ink per step.
+GRID_LIGHT = ["#e9f5ee", "#c6e7d3", "#8fcdaa", "#4ea77a", "#1f7a4d"]
+GRID_DARK = ["#1c3a2c", "#21503a", "#2a6b4b", "#3c8d63", "#5fc38f"]
+
+
+def date_grid(rows, label):
+    """Calendar heatmap: every departure date's cheapest per-person fare (any trip length)."""
+    by_day = {}
+    for dep, ret, price, origin in rows:
+        if dep not in by_day or price < by_day[dep][1]:
+            by_day[dep] = (ret, price, origin)
+    if not by_day:
+        return ""
+    prices = sorted(p for _, p, _ in by_day.values())
+    cuts = [prices[min(len(prices) - 1, int(len(prices) * q))] for q in (0.2, 0.4, 0.6, 0.8)]
+
+    def step(p):                       # 4 = cheapest fifth ... 0 = priciest fifth
+        return 4 - sum(p > x for x in cuts)
+    first = date.fromisoformat(min(by_day))
+    last = date.fromisoformat(max(by_day))
+    d = first - timedelta(days=first.weekday())          # back to Monday
+    cells = []
+    while d <= last:
+        iso = d.isoformat()
+        day = f"{d:%b} {d.day}" if (d.day == 1 or d == first) else str(d.day)
+        if iso in by_day and d >= first:
+            ret, p, o = by_day[iso]
+            k = step(p)
+            cells.append(f'<span class="cell s{k}" title="{pretty(iso)} · {nights(iso, ret)} nights, back {pretty(ret)} · '
+                         f'{money(p)} per person">{day}<b>{money(p)}</b></span>')
+        elif first <= d <= last:
+            cells.append(f'<span class="cell none" title="{pretty(iso)}: no price">{day}<b>–</b></span>')
+        else:
+            cells.append('<span class="cell pad"></span>')
+        d += timedelta(days=1)
+    head = "".join(f"<span>{x}</span>" for x in ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))
+    legend = ('<span class="legend">cheaper ' + "".join(f'<i class="s{k}"></i>' for k in (4, 3, 2, 1, 0))
+              + ' pricier</span>')
+    return (f'<details class="grid"><summary>Every departure date ({label})</summary>'
+            f'<div class="cal"><div class="wk">{head}</div><div class="days">{"".join(cells)}</div></div>'
+            f'<p class="gnote">Cheapest {STAY_LABEL}-night trip leaving each day, per person; hover a day for the '
+            f'trip length and return date. {legend}</p></details>')
+
+
+def open_jaw_rows(c, g, current):
+    rows = []
+    for gkey, a, b in OPEN_JAW:
+        if gkey != g["key"]:
+            continue
+        cities = {code: city for code, city, _ in g["dests"]}
+        for into, home_from in ((a, b), (b, a)):
+            row = c.execute("SELECT depart, ret, price, origin, seen FROM openjaw WHERE combo=? AND seen >= datetime('now', '-3 days')",
+                            (f"{gkey}:{into}-{home_from}",)).fetchone()
+            if not row:
+                continue
+            dep, ret, price, origin, seen = row
+            rt_in = current.get(rkey(g, into), (None, None, None))[2]
+            rt_out = current.get(rkey(g, home_from), (None, None, None))[2]
+            vs = []
+            if rt_in:
+                vs.append(f"{money(price - rt_in)} {'more' if price >= rt_in else 'less'} than a round trip to {cities[into]}"
+                          if abs(price - rt_in) >= 5 else f"about the same as a round trip to {cities[into]}")
+            if rt_out:
+                vs.append(f"{cities[home_from]} round trip is {money(rt_out)}")
+            rows.append((price, f"""
+      <li class="row">
+        <span class="code">{into}<small>→{home_from}</small></span>
+        <div class="mid"><div class="city">Into {escape(cities[into])}, home from {escape(cities[home_from])}</div>
+          <div class="dates">From {origin} · {pretty(dep)} – {pretty(ret)} · {nights(dep, ret)} nights</div>
+          <div class="trend">{escape(' · '.join(vs))}. Getting from {escape(cities[into])} to {escape(cities[home_from])} is on you (train, bus or a cheap regional flight).</div></div>
+        <div class="right"><span class="price">{money(price)}</span><span class="pp">per person · {money(price * ADULTS)} for {ADULTS}</span></div>
+        <a class="check" href="{escape(gflights_multi(origin, into, home_from, dep, ret))}" target="_blank" rel="noopener">Check this trip on Google Flights</a>
+      </li>"""))
+    return "".join(r[1] for r in sorted(rows, key=lambda r: r[0]))
+
+
 # ---------------------------------------------------------------- web page
 SITE = Path(os.environ.get("SITE_DIR", "site"))
 
@@ -541,7 +791,7 @@ def build_site(c, current):
     except Exception:
         stamp = today.strftime("%a %b %d, %H:%M UTC")
     updated_ms = int(today.timestamp() * 1000)
-    start, end = departure_window(STAY_DAYS)
+    start, end = departure_window(STAYS[-1])[0], departure_window(STAYS[0])[1]
 
     sections = []
     for g in GROUPS:
@@ -567,23 +817,26 @@ def build_site(c, current):
       <li class="row">
         <span class="code">{code}</span>
         <div class="mid"><div class="city">{escape(name)}</div>
-          <div class="dates">{via}{pretty(dep)} – {pretty(ret)}</div>
+          <div class="dates">{via}{pretty(dep)} – {pretty(ret)} · {nights(dep, ret)} nights</div>
           <div class="chart">{trend}</div></div>
         <div class="right"><span class="price">{money(price)}</span><span class="pp">per person · {money(price * ADULTS)} for {ADULTS}</span>{low}<span class="now">{moved}</span></div>
         <a class="check" href="{escape(gflights(origin, code, dep, ret))}" target="_blank" rel="noopener">Check this fare on Google Flights</a>
+        {date_grid(calendar_rows(c, key), "scan prices, may include BWI" if g.get("exclude") else "round trip")}
       </li>""")
         if not rows:
             continue
+        oj = open_jaw_rows(c, g, current)
         hid = g["key"].lower()
         sections.append(f"""
 <section aria-labelledby="{hid}">
   <div class="head"><h2 id="{hid}">From {escape(g['label'])} <span class="sub">{escape(g['short'])} · {escape(stops_label(g))}</span></h2></div>
   <ol class="board">{''.join(rows)}
   </ol>
+  {f'<h3 class="ojh">Two-city trips from {escape(g["label"])}</h3><ol class="board">{oj}</ol>' if oj else ''}
 </section>""")
 
     html = PAGE.format(
-        stay=STAY_DAYS, start=pretty(start.isoformat()), end=pretty(end.isoformat()),
+        stay=STAY_LABEL, start=pretty(start.isoformat()), end=pretty(end.isoformat()),
         home_by=pretty(TRIP_END.isoformat()), stamp=stamp, sections="".join(sections),
         hours="4 times a day", adults=ADULTS, updated_ms=updated_ms, stale_hours=STALE_HOURS)
     SITE.mkdir(parents=True, exist_ok=True)
@@ -653,6 +906,24 @@ section h2 {{ font-size:1.25rem; }}
 .spark .hit rect {{ fill:transparent; }}
 .spark .hit circle {{ fill:var(--ink); stroke:var(--surface); stroke-width:2; opacity:0; }}
 .spark .hit:hover circle {{ opacity:1; }}
+.code small {{ display:block; font-size:.7rem; letter-spacing:.02em; color:var(--muted); }}
+.ojh {{ font-family:var(--serif); font-size:1.05rem; margin:22px 0 0; }}
+.grid {{ grid-column:1/-1; margin-top:6px; }}
+.grid summary {{ cursor:pointer; font-size:.88rem; font-weight:500; color:var(--ink-2); }}
+.cal {{ margin-top:10px; max-width:560px; }}
+.wk, .days {{ display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:2px; }}
+.wk span {{ font-size:.72rem; color:var(--muted); text-align:center; padding-bottom:2px; }}
+.cell {{ border-radius:4px; padding:4px 2px; text-align:center; font-size:.68rem; line-height:1.2; color:#14233a; min-height:38px; }}
+.cell b {{ display:block; font-size:.78rem; font-variant-numeric:tabular-nums; }}
+.cell.pad {{ background:transparent; }}
+.cell.none {{ background:var(--line); color:var(--muted); }}
+.s0 {{ background:#e9f5ee; }} .s1 {{ background:#c6e7d3; }} .s2 {{ background:#8fcdaa; }}
+.s3 {{ background:#4ea77a; color:#fff; }} .s4 {{ background:#1f7a4d; color:#fff; }}
+@media (prefers-color-scheme: dark) {{ .s0 {{ background:#1c3a2c; color:#eef1f5; }} .s1 {{ background:#21503a; color:#eef1f5; }}
+  .s2 {{ background:#2a6b4b; color:#eef1f5; }} .s3 {{ background:#3c8d63; color:#0f1828; }} .s4 {{ background:#5fc38f; color:#0f1828; }} }}
+.gnote {{ font-size:.78rem; color:var(--muted); margin:8px 0 0; }}
+.legend {{ white-space:nowrap; margin-left:6px; }}
+.legend i {{ display:inline-block; width:14px; height:10px; border-radius:2px; vertical-align:-1px; margin:0 1px; }}
 .trend {{ font-size:.8rem; color:var(--muted); font-variant-numeric:tabular-nums; margin-top:2px; }}
 .stale {{ background:#fff4e0; color:#6b3d00; border:1px solid #f0c27a; border-radius:10px; padding:12px 16px; font-weight:500; }}
 @media (prefers-color-scheme: dark) {{ .stale {{ background:#3a2a10; color:#f5d9a8; border-color:#7a5a20; }} }}
@@ -665,7 +936,7 @@ footer .wrap {{ padding-block:20px 28px; color:var(--muted); font-size:.84rem; }
   <div>
     <p class="eyebrow">Spring 2027 trip watch</p>
     <h1>{stay} days away, <em>somewhere far</em>, this May or June.</h1>
-    <p class="lede">Round-trip fares from Salt Lake City and from Washington, DC, checked {hours}. This page shows today's cheapest fare for each city, next to the lowest ever found, and updates after every check.</p>
+    <p class="lede">Round-trip fares from Salt Lake City and from Washington, DC, for {adults} travelers, checked {hours} ({stay}-night trips; 9, 11 and 12 nights once a day). This page shows today's cheapest fare for each city, next to the lowest ever found, and updates after every check.</p>
     <div class="facts"><span class="fact">SLC or DCA/IAD departures</span><span class="fact">{stay} nights</span>
       <span class="fact">Leave {start} – {end}</span><span class="fact">Home by {home_by}</span></div>
   </div>
@@ -674,7 +945,7 @@ footer .wrap {{ padding-block:20px 28px; color:var(--muted); font-size:.84rem; }
   <div id="stale" class="stale" role="status" hidden></div>
   <div class="head"><h2>Current prices</h2><span class="stamp">Last checked {stamp}</span></div>
   {sections}
-  <p class="note">Each big number is the cheapest {stay}-night round trip for that city at the latest check, per person, with {adults} seats on the same flights: economy, taxes included. The line under each city is its cheapest fare each day; hover it for that day's price. For Washington it's the cheapest date from Reagan (DCA) or Dulles (IAD), never BWI, checked with a full fare search. Below it is the lowest fare seen since tracking started, with its departure date and the day it was found.</p>
+  <p class="note">Each big number is the cheapest {stay}-night round trip for that city, per person, with {adults} seats on the same flights: economy, taxes included. The line under each city is its cheapest fare each day; hover it for that day's price. For Washington it's the cheapest date from Reagan (DCA) or Dulles (IAD), never BWI, checked with a full fare search. Below it is the lowest fare seen since tracking started, with its departure date and the day it was found.</p>
 </div></main>
 <footer><div class="wrap">Prices are what Ignav reported at the time of each check. Confirm on the booking site before you buy.</div></footer>
 <script>(function(){{var h=(Date.now()-{updated_ms})/36e5;if(h>{stale_hours}){{var e=document.getElementById("stale");
@@ -713,25 +984,38 @@ def main():
     if start > end:
         log(f"travel window {TRIP_START} to {TRIP_END} has passed; nothing to check")
         return
-    log(f"{STAY_DAYS}-night trips leaving {pretty(start.isoformat())} to {pretty(end.isoformat())}, "
-        f"back by {pretty(TRIP_END.isoformat())}, {stops_label()}")
+    today_mt = mountain_now().date().isoformat()
+    flex = meta_get(c, "flex_day") != today_mt          # first run of the day: all trip lengths
+    run_stays = STAYS if flex else [STAY_DAYS]
+    log(f"{'/'.join(map(str, run_stays))}-night trips{' (daily all-lengths check)' if flex else ''}, "
+        f"window {pretty(TRIP_START.isoformat())} to {pretty(TRIP_END.isoformat())}, {stops_label()}")
     routes = [(g, d) for g in GROUPS for d in g["dests"]]
     names = {rkey(g, d[0]): (d[1] if g["key"] == HOME else f"{d[1]} from DC", d[0]) for g, d in routes}
     for g, (code, city, seed) in routes:
         key = rkey(g, code)
         name = names[key][0]
-        try:
-            dates = cheapest_dates(g, code, seed, STAY_DAYS)
-        except Exception as e:
-            log(f"{g['short']}-{code}: failed: {e}")
+        fresh, failed = [], 0
+        for stay in run_stays:
+            if departure_window(stay)[0] > departure_window(stay)[1]:
+                continue
+            try:
+                rows = cheapest_dates(g, code, seed, stay)
+            except Exception as e:
+                log(f"{g['short']}-{code} {stay}n: failed: {e}")
+                failed += 1
+                continue
+            save_calendar(c, key, stay, rows)
+            fresh += rows
+        if failed == len(run_stays):
             errors += 1
             continue
+        c.executemany("INSERT INTO prices(origin, dest, depart, ret, price) VALUES (?,?,?,?,?)",
+                      [(g["key"], code, d, r, p) for d, r, p, _ in fresh])
+        c.commit()
+        dates = calendar_rows(c, key)        # this run's prices + today's other trip lengths
         if not dates:
             log(f"{g['short']}-{code}: no prices returned")
             continue
-        c.executemany("INSERT INTO prices(origin, dest, depart, ret, price) VALUES (?,?,?,?,?)",
-                      [(g["key"], code, d, r, p) for d, r, p, _ in dates])
-        c.commit()
         best_it = None
         if g.get("exclude"):
             try:
@@ -751,7 +1035,7 @@ def main():
         else:
             ratio, dep, ret, price, origin, normal, trusted = best_deal(c, g["key"], code, seed, dates)
         tier = "Scorching deal" if ratio <= SCORCHING else "Great deal" if ratio <= g.get("great", GREAT) else None
-        log(f"{origin}-{code} {city:13} {pretty(dep):10} ${price:>5.0f}  normal ~${normal:>5.0f}{'' if trusted else '*'} "
+        log(f"{origin}-{code} {city:13} {pretty(dep):10} {nights(dep, ret):>2}n ${price:>5.0f}  normal ~${normal:>5.0f}{'' if trusted else '*'} "
             f"{round(100 * (1 - ratio)):>3}% off  {tier or ''}")
         if not tier:
             continue
@@ -769,6 +1053,13 @@ def main():
     c.executemany("INSERT INTO snapshots(dest, price, depart, origin) VALUES (?,?,?,?)",
                   [(k, v[2], v[0], v[3]) for k, v in current.items()])
     c.commit()
+    if flex:
+        try:
+            check_open_jaws(c, current)
+        except Exception as e:            # bonus feature; never block the rest
+            log(f"two-city check failed: {e}")
+        meta_set(c, "flex_day", today_mt)
+        c.commit()
     if TEST_DIGEST:
         log(f"TEST_DIGEST: skipping {len(found)} deal email(s) and new-low checks; sending the summary only")
         if not send_digest(c, current):
@@ -776,6 +1067,7 @@ def main():
         c.close()
         return
     new_lows = find_new_lows(c, current, {d["key"] for d in found}, names)
+    climbs = find_climbs(c, current, names)
 
     try:
         build_site(c, current)
@@ -793,6 +1085,11 @@ def main():
             send_new_lows(new_lows)
         except Exception as e:
             log(f"new-low email failed: {e}")
+    if climbs:
+        try:
+            send_climbs(c, climbs)
+        except Exception as e:
+            log(f"climbing email failed: {e}")
     maybe_digest(c, current)
     c.execute("DELETE FROM prices WHERE seen < datetime('now', ?)", (f"-{HISTORY_DAYS} days",))
     c.commit()
