@@ -27,7 +27,7 @@ permissions:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25      # the once-a-day all-lengths + two-city run takes ~8 min
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
