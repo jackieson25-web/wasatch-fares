@@ -52,7 +52,9 @@ GROUPS = [
         ("WAW", "Warsaw",        850),
         ("PVG", "Shanghai",     1000),
         ("LIM", "Lima",         1000),
-        ("EZE", "Buenos Aires", 1325),
+        # Buenos Aires removed 11-21 (Jack). Berlin + Budapest added 11-21 (PROVISIONAL usual fares).
+        ("BER", "Berlin",        850),
+        ("BUD", "Budapest",      900),
     ]),
     # Searched as the WAS metro code (1 lookup instead of 2) with BWI thrown out.
     # Prices here are FIXED "normal" fares, not learned from history: roughly what
@@ -64,6 +66,8 @@ GROUPS = [
         ("DUB", "Dublin",   700),
         ("WAW", "Warsaw",   760),
         ("CAI", "Cairo",    900),
+        ("BER", "Berlin",   700),     # added 11-21, PROVISIONAL
+        ("BUD", "Budapest", 750),     # added 11-21, PROVISIONAL
     ]),
 ]
 
@@ -124,7 +128,7 @@ CLIMB_STEP = 50
 
 # Two-city trips: fly into one city, home from the other (you get between them yourselves).
 # Checked once a day on the 3 cheapest dates of the first city's round trips (~18 requests a day).
-OPEN_JAW = [(HOME, "DUB", "WAW"), ("DC", "DUB", "WAW")]   # Lima/Buenos Aires dropped 11-21 (Jack)
+OPEN_JAW = [(HOME, "DUB", "WAW"), ("DC", "DUB", "WAW"), (HOME, "BER", "WAW"), ("DC", "BER", "WAW")]   # Lima/Buenos Aires dropped 11-21 (Jack)
 OPEN_JAW_DATES = 3
 OPEN_JAW_COMBOS = {f"{g}:{x}-{y}" for g, a, b in OPEN_JAW for x, y in ((a, b), (b, a))}
 # Test mode: fresh prices, then ONLY the weekly summary, sent to SMTP_USER alone with [TEST].
