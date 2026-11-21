@@ -52,9 +52,10 @@ GROUPS = [
         ("WAW", "Warsaw",        850),
         ("PVG", "Shanghai",     1000),
         ("LIM", "Lima",         1000),
-        # Buenos Aires removed 11-21 (Jack). Berlin + Budapest added 11-21 (PROVISIONAL usual fares).
-        ("BER", "Berlin",        850),
-        ("BUD", "Budapest",      900),
+        # Buenos Aires removed 11-21 (Jack). Berlin + Budapest added 11-21; usual fares = live
+        # 2-seat prices that day (BER $856, BUD $910): alert at <= $602 / $637.
+        ("BER", "Berlin",        860),
+        ("BUD", "Budapest",      910),
     ]),
     # Searched as the WAS metro code (1 lookup instead of 2) with BWI thrown out.
     # Prices here are FIXED "normal" fares, not learned from history: roughly what
@@ -65,9 +66,8 @@ GROUPS = [
          fixed_normal=True, great=0.70, dests=[
         ("DUB", "Dublin",   700),
         ("WAW", "Warsaw",   760),
-        ("CAI", "Cairo",    900),
-        ("BER", "Berlin",   700),     # added 11-21, PROVISIONAL
-        ("BUD", "Budapest", 750),     # added 11-21, PROVISIONAL
+        ("BER", "Berlin",   720),     # added 11-21 at that day's live price ($720): alert at <= $504
+        # Cairo + Budapest from DC dropped 11-21 (Jack): DC kept only as a maybe-start for Europe.
     ]),
 ]
 
