@@ -20,7 +20,7 @@ check it also publishes a page showing the lowest price found for each city.
 - **Page:** a 60-day trend line per city (hover for each day's price), and a warning banner if prices haven't updated in 12+ hours.
 
 - **Prices climbing:** one email when a city is $60+ (or 8%+) above its 14-day low, after 7 days of checks; then quiet for a week unless it climbs another $50.
-- **Two-city trips:** once a day, fly into one city and home from the other (SLC: Dublin/Warsaw and Lima/Buenos Aires; DC: Dublin/Warsaw), both directions, on the 3 cheapest dates. Shown on the page and in the weekly summary. Getting between the two cities is up to you.
+- **Two-city trips:** once a day, fly into one city and home from the other (Dublin/Warsaw from both SLC and DC), both directions, on the 3 cheapest dates. Shown on the page and in the weekly summary. Getting between the two cities is up to you.
 - **Date grid:** tap "Every departure date" under any city to see the cheapest trip leaving each day, shaded cheaper to pricier.
 - **Cost:** about 4,300 Ignav requests a month (~$8.60).
 

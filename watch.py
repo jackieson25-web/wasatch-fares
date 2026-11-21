@@ -124,8 +124,9 @@ CLIMB_STEP = 50
 
 # Two-city trips: fly into one city, home from the other (you get between them yourselves).
 # Checked once a day on the 3 cheapest dates of the first city's round trips (~18 requests a day).
-OPEN_JAW = [(HOME, "DUB", "WAW"), (HOME, "LIM", "EZE"), ("DC", "DUB", "WAW")]
+OPEN_JAW = [(HOME, "DUB", "WAW"), ("DC", "DUB", "WAW")]   # Lima/Buenos Aires dropped 11-21 (Jack)
 OPEN_JAW_DATES = 3
+OPEN_JAW_COMBOS = {f"{g}:{x}-{y}" for g, a, b in OPEN_JAW for x, y in ((a, b), (b, a))}
 # Test mode: fresh prices, then ONLY the weekly summary, sent to SMTP_USER alone with [TEST].
 TEST_DIGEST = os.environ.get("TEST_DIGEST") == "1"
 
@@ -484,6 +485,8 @@ def send_digest(c, current):
     oj = []
     for row in c.execute("SELECT combo, depart, ret, price, origin FROM openjaw WHERE seen >= datetime('now', '-3 days') ORDER BY price"):
         combo, dep, ret, price, origin = row
+        if combo not in OPEN_JAW_COMBOS:   # pairs since removed from OPEN_JAW
+            continue
         gkey, pair = combo.split(":")
         into, home_from = pair.split("-")
         oj.append(card(f"Into {into}, home from {home_from} · {money(price)} per person",
