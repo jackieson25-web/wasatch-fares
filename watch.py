@@ -99,11 +99,26 @@ SMTP_USER = os.environ.get("SMTP_USER", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
-DB = Path(os.environ.get("DB_PATH", "data/fares-v4.db"))   # v4: 10-night trips only
+# v5 (2026-11-21): prices are for 2 travelers, stored PER PERSON. v4 was 1 adult, so it isn't mixed in.
+DB = Path(os.environ.get("DB_PATH", "data/fares-v5.db"))
+
+# Two travelers (Jack + wife). Ignav's calendar price is the whole-party total, so every
+# price is divided by ADULTS and handled per person. Usual fares/thresholds stay per person.
+ADULTS = int(os.environ.get("ADULTS", "2"))
+NEW_LOW_MIN = 15          # $ per person a fare must beat the old all-time low by to email
+NEW_LOW_MIN_DAYS = 7      # days of checks for a city before new-low emails start
+DIGEST_WEEKDAY = 6        # Sunday (Mountain time): weekly summary email
+DIGEST_HOUR = 6           # first run on Sunday at/after 6 AM MT sends it
+PAGE_URL = "https://jackieson25-web.github.io/wasatch-fares/"
+STALE_HOURS = 12          # page shows a warning if it hasn't updated in this long
 
 
 def log(*a):
     print(datetime.now().strftime("%H:%M:%S"), *a, flush=True)
+
+
+def per_person(amount):
+    return float(amount) / ADULTS
 
 
 # ---------------------------------------------------------------- fare data
@@ -156,10 +171,10 @@ def airport_dates(g, origin, dest, stay):
         try:
             data = api("/api/fares/cheapest-dates", {
                 "origin": origin, "destination": dest, "stay_days": stay, "market": "US",
-                "max_stops": stops_for(g, dest),
+                "max_stops": stops_for(g, dest), "adults": ADULTS,
                 "departure_date_range": {"start": lo.isoformat(), "end": hi.isoformat()},
             })
-            out += [(d["departure_date"], d.get("return_date"), float(d["price"]["amount"]))
+            out += [(d["departure_date"], d.get("return_date"), per_person(d["price"]["amount"]))
                     for d in data.get("dates", []) if d.get("status") == "priced" and d.get("price")]
         except RuntimeError as e:         # skip this month, keep the rest
             log(f"  {origin}-{dest} {lo:%b %d}-{hi:%b %d} skipped: {str(e)[:120]}")
@@ -175,7 +190,7 @@ def round_trip(g, origin, dest, depart, ret):
     come back to an excluded airport (e.g. BWI inside the WAS metro code)."""
     data = api("/api/fares/round-trip", {"origin": origin, "destination": dest, "market": "US",
                                          "departure_date": depart, "return_date": ret,
-                                         "max_stops": stops_for(g, dest)})
+                                         "max_stops": stops_for(g, dest), "adults": ADULTS})
     skip = set(g.get("exclude", ()))
 
     def ok(i):
@@ -197,7 +212,9 @@ def verify(g, dest, dates):
         return None, None
     best = its[0]
     airport = best["outbound"]["segments"][0].get("departure_airport") or g["origins"][0]
-    return (dep, ret, float(best["price"]["amount"]), airport), best
+    log(f"  {dest} {dep}: calendar ${price:.0f} pp vs full search ${per_person(best['price']['amount']):.0f} pp "
+        f"(raw ${float(best['price']['amount']):.0f} for {ADULTS})")
+    return (dep, ret, per_person(best["price"]["amount"]), airport), best
 
 
 def flight_details(g, origin, dest, depart, ret, best=None):
@@ -254,6 +271,12 @@ def db():
                                        seen TEXT DEFAULT (datetime('now')));
     CREATE INDEX IF NOT EXISTS p_dest ON prices(origin, dest, depart);
     CREATE TABLE IF NOT EXISTS alerts (dest TEXT, price REAL, sent TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS lows (dest TEXT PRIMARY KEY, price REAL, depart TEXT, ret TEXT,
+                                     found TEXT, origin TEXT);
+    -- today's cheapest per city after every check (verified price for DC): feeds charts + digest
+    CREATE TABLE IF NOT EXISTS snapshots (dest TEXT, price REAL, depart TEXT, origin TEXT,
+                                          seen TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT);
     """)
     return c
 
@@ -291,7 +314,7 @@ def pretty(iso):
 def send_email(deals):
     if len(deals) == 1:
         d = deals[0]
-        subject = f"{'🔥 SCORCHING: ' if d['tier'] == 'Scorching deal' else '✈ '}{d['name']} ${d['price']:.0f} round trip (usually ~${d['normal']:.0f})"
+        subject = f"{'🔥 SCORCHING: ' if d['tier'] == 'Scorching deal' else '✈ '}{d['name']} ${d['price']:.0f} per person (usually ~${d['normal']:.0f})"
     else:
         hot = any(d["tier"] == "Scorching deal" for d in deals)
         subject = f"{'🔥 SCORCHING: ' if hot else '✈ '}{len(deals)} flight deals: " + ", ".join(f"{d['name']} ${d['price']:.0f}" for d in deals[:4])
@@ -307,31 +330,34 @@ def send_email(deals):
 <div style="border:1px solid #e5e7eb;border-radius:12px;padding:16px;margin:0 0 14px">
   <div style="font-size:11px;font-weight:bold;letter-spacing:.06em;text-transform:uppercase;color:{color}">{d['tier']} · {d['origin']} → {d['dest']}</div>
   <div style="font-size:22px;font-weight:bold;margin:4px 0">{escape(d['name'])}</div>
-  <div style="font-size:28px;font-weight:bold">${d['price']:.0f}
+  <div style="font-size:28px;font-weight:bold">${d['price']:.0f}<span style="font-size:14px;font-weight:normal"> per person</span>
     <span style="font-size:14px;font-weight:normal;color:#6b7280;text-decoration:line-through">${d['normal']:.0f}</span>
     <span style="font-size:14px;color:#1f7a4d">{d['pct']}% off</span>
     <span style="font-size:12px;font-weight:normal;color:#6b7280">{basis}</span></div>
-  <div style="color:#374151;margin:6px 0 10px;font-size:14px">{pretty(d['depart'])} – {pretty(d['ret'])}{airline}{stops}</div>
+  <div style="color:#374151;margin:6px 0 10px;font-size:14px">{money(d['price'] * ADULTS)} total for {ADULTS} · {pretty(d['depart'])} – {pretty(d['ret'])}{airline}{stops}</div>
   {f'<div style="font-size:13px;color:#374151;margin:0 0 12px">Similar prices: {others}</div>' if others else ''}
   <a href="{escape(d['link'])}" style="display:inline-block;background:#14233a;color:#fff;font-weight:bold;text-decoration:none;padding:10px 16px;border-radius:8px">Check this fare →</a>
 </div>""")
-        text.append(f"{d['tier']}: {d['name']} ${d['price']:.0f} (usually ~${d['normal']:.0f}), "
+        text.append(f"{d['tier']}: {d['name']} ${d['price']:.0f} per person, {money(d['price'] * ADULTS)} for {ADULTS} (usually ~${d['normal']:.0f} pp), "
                     f"{d['depart']} to {d['ret']}. {d['link']}" + (f"\n  Similar: {others}" if others else ""))
 
     html = f"""<div style="font-family:Helvetica,Arial,sans-serif;max-width:560px;margin:auto;color:#14233a">
-<p style="font-size:15px">Round trip, economy, 1 adult, {stops_label()}. Cheap fares can disappear within hours, so confirm before you book.</p>
+<p style="font-size:15px">Round trip, economy, {ADULTS} adults (prices per person, {ADULTS} seats checked), {stops_label()}. Cheap fares can disappear within hours, so confirm before you book.</p>
 {''.join(cards)}</div>"""
+    return deliver(subject, "\n\n".join(text), html)
 
+
+def deliver(subject, text, html):
     msg = EmailMessage()
     msg["From"] = f"Fare Watch <{SMTP_USER or 'fare-watch@localhost'}>"
     msg["To"] = TO
     msg["Subject"] = subject
-    msg.set_content("\n\n".join(text))
+    msg.set_content(text)
     msg.add_alternative(html, subtype="html")
 
     if not (SMTP_USER and SMTP_PASSWORD and TO):
         Path("outbox").mkdir(exist_ok=True)
-        p = Path("outbox") / f"{datetime.now():%Y%m%d-%H%M%S}.eml"
+        p = Path("outbox") / f"{datetime.now():%Y%m%d-%H%M%S-%f}.eml"
         p.write_bytes(bytes(msg))
         log(f"email not configured, saved to {p}")
         return True
@@ -341,6 +367,147 @@ def send_email(deals):
         s.send_message(msg)
     log(f"emailed {TO}: {subject}")
     return True
+
+
+def daily(c, key, days=60):
+    """[(day, cheapest per-person fare that day)] from the after-check snapshots."""
+    return c.execute("""SELECT date(seen), MIN(price) FROM snapshots WHERE dest=?
+                        AND seen >= datetime('now', ?) GROUP BY date(seen) ORDER BY 1""",
+                     (key, f"-{days} days")).fetchall()
+
+
+def week_change(c, key, price):
+    """Per-person change vs the cheapest fare on the latest day at least 7 days ago, or None."""
+    row = c.execute("""SELECT MIN(price) FROM snapshots WHERE dest=? AND date(seen) =
+                         (SELECT MAX(date(seen)) FROM snapshots WHERE dest=? AND seen <= datetime('now', '-7 days'))""",
+                    (key, key)).fetchone()
+    return None if row[0] is None else price - row[0]
+
+
+def change_words(diff):
+    if diff is None:
+        return "no week-ago price yet"
+    if abs(diff) < 5:
+        return "about the same as a week ago"
+    return f"{'down' if diff < 0 else 'up'} {money(abs(diff))} from a week ago"
+
+
+def card(title, lines, link=None, accent="#14233a"):
+    btn = (f'<a href="{escape(link)}" style="display:inline-block;margin-top:8px;color:#14233a;font-weight:bold">'
+           'Check this fare →</a>') if link else ""
+    body = "".join(f'<div style="font-size:14px;color:#374151;margin-top:2px">{l}</div>' for l in lines)
+    return (f'<div style="border:1px solid #e5e7eb;border-left:4px solid {accent};border-radius:10px;'
+            f'padding:12px 14px;margin:0 0 10px"><div style="font-size:16px;font-weight:bold">{title}</div>'
+            f'{body}{btn}</div>')
+
+
+def send_new_lows(lows):
+    """One email listing every city that just set a new all-time low."""
+    if len(lows) == 1:
+        d = lows[0]
+        subject = f"📉 New low: {d['name']} {money(d['price'])} per person (was {money(d['prev'])})"
+    else:
+        subject = f"📉 {len(lows)} new lows: " + ", ".join(f"{d['name']} {money(d['price'])}" for d in lows[:4])
+    cards, text = [], []
+    for d in lows:
+        lines = [f"<b>{money(d['price'])} per person</b> · {money(d['price'] * ADULTS)} for {ADULTS} · "
+                 f"old low {money(d['prev'])}",
+                 f"{pretty(d['depart'])} – {pretty(d['ret'])} · from {d['origin']}"]
+        cards.append(card(escape(d["name"]), lines, d["link"], "#1f7a4d"))
+        text.append(f"{d['name']}: new low {money(d['price'])} per person ({money(d['price'] * ADULTS)} for {ADULTS}), "
+                    f"was ${d['prev']:.0f}. {d['depart']} to {d['ret']}. {d['link']}")
+    html = f"""<div style="font-family:Helvetica,Arial,sans-serif;max-width:560px;margin:auto;color:#14233a">
+<p style="font-size:15px">Cheapest price seen since tracking started (at least {money(NEW_LOW_MIN)} per person under the old low). Not necessarily a deal, but the best so far.</p>
+{''.join(cards)}<p style="font-size:13px"><a href="{PAGE_URL}">All prices and trends →</a></p></div>"""
+    return deliver(subject, "\n\n".join(text) + f"\n\n{PAGE_URL}", html)
+
+
+def send_digest(c, current):
+    """Sunday summary: every city's price now, all-time low, and week-over-week change."""
+    lows = {r[0]: r[1] for r in c.execute("SELECT dest, price FROM lows")}
+    sections, text, moved = [], [], []
+    for g in GROUPS:
+        rows = []
+        for code, city, _ in g["dests"]:
+            key = rkey(g, code)
+            if key not in current:
+                continue
+            dep, ret, price, origin = current[key]
+            diff = week_change(c, key, price)
+            if diff is not None:
+                moved.append(diff)
+            lp = lows.get(key, price)
+            low = "at its all-time low" if price - lp < 1 else f"all-time low {money(lp)}"
+            accent = ("#1f7a4d" if diff is not None and diff <= -5 else
+                      "#b4232c" if diff is not None and diff >= 5 else "#c9d1dc")
+            rows.append((price, card(f"{escape(city)} · {money(price)} per person",
+                                     [f"{money(price * ADULTS)} for {ADULTS} · {change_words(diff)} · {low}",
+                                      f"Cheapest: {pretty(dep)} – {pretty(ret)} from {origin}"],
+                                     gflights(origin, code, dep, ret), accent)))
+            text.append(f"{g['short']} to {city}: {money(price)} pp ({money(price * ADULTS)} for {ADULTS}), "
+                        f"{change_words(diff)}, {low}")
+        if rows:
+            sections.append(f'<h3 style="font-size:15px;margin:18px 0 8px">From {escape(g["label"])}</h3>'
+                            + "".join(r[1] for r in sorted(rows, key=lambda r: r[0])))
+    if not sections:
+        return False
+    downs, ups = sum(1 for d in moved if d <= -5), sum(1 for d in moved if d >= 5)
+    subject = f"🗓 Weekly fares: {downs} down, {ups} up this week" if moved else "🗓 Weekly fares summary"
+    html = f"""<div style="font-family:Helvetica,Arial,sans-serif;max-width:560px;margin:auto;color:#14233a">
+<p style="font-size:15px">Your weekly look at {STAY_DAYS}-night round trips for {ADULTS}, prices per person. Green edge = cheaper than a week ago, red = pricier, gray = flat or too new to tell.</p>
+{''.join(sections)}<p style="font-size:13px;margin-top:16px"><a href="{PAGE_URL}">See the trend charts →</a></p></div>"""
+    return deliver(subject, "\n".join(text) + f"\n\n{PAGE_URL}", html)
+
+
+def mountain_now():
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("America/Denver"))
+    except Exception:
+        return datetime.now(timezone.utc) - timedelta(hours=7)
+
+
+def maybe_digest(c, current):
+    now = mountain_now()
+    iso = now.isocalendar()
+    week = f"{iso[0]}-W{iso[1]:02d}"
+    forced = os.environ.get("DIGEST_NOW") == "1"
+    if not forced and not (now.weekday() == DIGEST_WEEKDAY and now.hour >= DIGEST_HOUR):
+        return
+    sent = c.execute("SELECT v FROM meta WHERE k='digest_week'").fetchone()
+    if not forced and sent and sent[0] == week:
+        return
+    try:
+        if send_digest(c, current):
+            c.execute("INSERT OR REPLACE INTO meta(k, v) VALUES ('digest_week', ?)", (week,))
+            c.commit()
+            log(f"weekly summary sent ({week})")
+    except Exception as e:            # never let the summary break a run
+        log(f"weekly summary failed: {e}")
+
+
+def sparkline(series, now_price):
+    """Small inline SVG trend of the daily cheapest fare. Hover a day for its price."""
+    if len(series) < 2:
+        return '<div class="trend">Trend line starts after 2 days of checks</div>'
+    W, H, P = 200, 40, 5
+    ps = [p for _, p in series]
+    lo, hi = min(ps), max(ps)
+    span = max(hi - lo, 1.0)
+    n = len(series)
+    xs = [P + (W - 2 * P) * i / (n - 1) for i in range(n)]
+    ys = [P + (H - 2 * P) * (1 - (p - lo) / span) for p in ps]
+    path = "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in zip(xs, ys))
+    step = (W - 2 * P) / (n - 1)
+    hits = "".join(
+        f'<g class="hit"><rect x="{max(0, x - step / 2):.1f}" y="0" width="{step:.1f}" height="{H}"/>'
+        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4"/><title>{pretty(d)}: {money(p)} per person</title></g>'
+        for (d, p), x, y in zip(series, xs, ys))
+    label = (f"Cheapest fare per person over the last {n} days: low {money(lo)}, high {money(hi)}, "
+             f"now {money(now_price)}")
+    return (f'<svg class="spark" viewBox="0 0 {W} {H}" width="{W}" height="{H}" role="img" aria-label="{label}">'
+            f'<path d="{path}"/><circle class="end" cx="{xs[-1]:.1f}" cy="{ys[-1]:.1f}" r="4"/>{hits}</svg>'
+            f'<div class="trend">{n}-day range {money(lo)}–{money(hi)}</div>')
 
 
 # ---------------------------------------------------------------- web page
@@ -354,10 +521,6 @@ def money(x):
 def build_site(c, current):
     """Write site/index.html: lowest fare ever found per city, plus today's cheapest.
     The lowest-ever record is kept in its own table so it survives price-history cleanup."""
-    c.execute("""CREATE TABLE IF NOT EXISTS lows (dest TEXT PRIMARY KEY, price REAL, depart TEXT,
-                                                 ret TEXT, found TEXT)""")
-    if "origin" not in [r[1] for r in c.execute("PRAGMA table_info(lows)")]:
-        c.execute("ALTER TABLE lows ADD COLUMN origin TEXT")
     today = datetime.now(timezone.utc)
     for key, (dep, ret, price, origin) in current.items():
         row = c.execute("SELECT price FROM lows WHERE dest=?", (key,)).fetchone()
@@ -372,6 +535,7 @@ def build_site(c, current):
         stamp = today.astimezone(ZoneInfo("America/Denver")).strftime("%a %b %-d, %-I:%M %p MT")
     except Exception:
         stamp = today.strftime("%a %b %d, %H:%M UTC")
+    updated_ms = int(today.timestamp() * 1000)
     start, end = departure_window(STAY_DAYS)
 
     sections = []
@@ -392,12 +556,15 @@ def build_site(c, current):
                 dep, ret, price, origin = ldep, lret, lp, lorig or g["origins"][0]
                 low = '<span class="now">All-time low · not checked this time</span>'
             via = f"From {origin} · " if g["key"] != HOME else ""
+            moved = change_words(week_change(c, key, price)) if cur else ""
+            trend = sparkline(daily(c, key), price)
             rows.append(f"""
       <li class="row">
         <span class="code">{code}</span>
         <div class="mid"><div class="city">{escape(name)}</div>
-          <div class="dates">{via}{pretty(dep)} – {pretty(ret)}</div></div>
-        <div class="right"><span class="price">{money(price)}</span>{low}</div>
+          <div class="dates">{via}{pretty(dep)} – {pretty(ret)}</div>
+          <div class="chart">{trend}</div></div>
+        <div class="right"><span class="price">{money(price)}</span><span class="pp">per person · {money(price * ADULTS)} for {ADULTS}</span>{low}<span class="now">{moved}</span></div>
         <a class="check" href="{escape(gflights(origin, code, dep, ret))}" target="_blank" rel="noopener">Check this fare on Google Flights</a>
       </li>""")
         if not rows:
@@ -413,7 +580,7 @@ def build_site(c, current):
     html = PAGE.format(
         stay=STAY_DAYS, start=pretty(start.isoformat()), end=pretty(end.isoformat()),
         home_by=pretty(TRIP_END.isoformat()), stamp=stamp, sections="".join(sections),
-        hours="4 times a day")
+        hours="4 times a day", adults=ADULTS, updated_ms=updated_ms, stale_hours=STALE_HOURS)
     SITE.mkdir(parents=True, exist_ok=True)
     (SITE / "index.html").write_text(html, encoding="utf-8")
     log(f"page written to {SITE / 'index.html'}")
@@ -421,7 +588,7 @@ def build_site(c, current):
 
 def gflights(origin, dest, depart, ret):
     return ("https://www.google.com/travel/flights?q=" +
-            quote(f"Flights from {origin} to {dest} on {depart} returning {ret}"))
+            quote(f"Flights from {origin} to {dest} on {depart} returning {ret} for {ADULTS} adults"))
 
 
 PAGE = """<!doctype html>
@@ -473,6 +640,17 @@ section h2 {{ font-size:1.25rem; }}
 @media (max-width:520px) {{ .row {{ grid-template-columns:48px minmax(0,1fr) auto; padding:16px; gap:4px 12px; }}
   .code {{ font-size:1.05rem; }} .price {{ font-size:1.45rem; }} .now {{ white-space:normal; }} }}
 .note {{ color:var(--muted); font-size:.88rem; margin:12px 0 0; max-width:60em; }}
+.pp {{ font-size:.84rem; color:var(--ink-2); font-variant-numeric:tabular-nums; white-space:nowrap; }}
+.chart {{ margin-top:8px; }}
+.spark {{ display:block; max-width:100%; height:auto; overflow:visible; }}
+.spark path {{ fill:none; stroke:var(--ink-2); stroke-width:2; stroke-linejoin:round; stroke-linecap:round; }}
+.spark .end {{ fill:var(--gold); stroke:var(--surface); stroke-width:2; }}
+.spark .hit rect {{ fill:transparent; }}
+.spark .hit circle {{ fill:var(--ink); stroke:var(--surface); stroke-width:2; opacity:0; }}
+.spark .hit:hover circle {{ opacity:1; }}
+.trend {{ font-size:.8rem; color:var(--muted); font-variant-numeric:tabular-nums; margin-top:2px; }}
+.stale {{ background:#fff4e0; color:#6b3d00; border:1px solid #f0c27a; border-radius:10px; padding:12px 16px; font-weight:500; }}
+@media (prefers-color-scheme: dark) {{ .stale {{ background:#3a2a10; color:#f5d9a8; border-color:#7a5a20; }} }}
 footer {{ border-top:1px solid var(--line); }}
 footer .wrap {{ padding-block:20px 28px; color:var(--muted); font-size:.84rem; }}
 </style></head>
@@ -488,16 +666,36 @@ footer .wrap {{ padding-block:20px 28px; color:var(--muted); font-size:.84rem; }
   </div>
 </div></header>
 <main><div class="wrap">
+  <div id="stale" class="stale" role="status" hidden></div>
   <div class="head"><h2>Current prices</h2><span class="stamp">Last checked {stamp}</span></div>
   {sections}
-  <p class="note">Each big number is the cheapest {stay}-night round trip for that city at the latest check: economy, 1 adult, taxes included. For Washington it's the cheapest date from Reagan (DCA) or Dulles (IAD), never BWI, checked with a full fare search. Below it is the lowest fare seen since tracking started, with its departure date and the day it was found.</p>
+  <p class="note">Each big number is the cheapest {stay}-night round trip for that city at the latest check, per person, with {adults} seats on the same flights: economy, taxes included. The line under each city is its cheapest fare each day; hover it for that day's price. For Washington it's the cheapest date from Reagan (DCA) or Dulles (IAD), never BWI, checked with a full fare search. Below it is the lowest fare seen since tracking started, with its departure date and the day it was found.</p>
 </div></main>
 <footer><div class="wrap">Prices are what Ignav reported at the time of each check. Confirm on the booking site before you buy.</div></footer>
+<script>(function(){{var h=(Date.now()-{updated_ms})/36e5;if(h>{stale_hours}){{var e=document.getElementById("stale");
+e.textContent="Heads up: these prices are "+Math.floor(h)+" hours old. The last few checks may have failed, so prices could be out of date.";e.hidden=false;}}}})();</script>
 </body></html>
 """
 
 
 # ---------------------------------------------------------------- main
+def find_new_lows(c, current, skip, names):
+    """Cities whose price now beats their all-time low by NEW_LOW_MIN per person.
+    Waits for NEW_LOW_MIN_DAYS of checks so early runs don't email a 'new low' every time."""
+    lows = {r[0]: r[1] for r in c.execute("SELECT dest, price FROM lows")}
+    out = []
+    for key, (dep, ret, price, origin) in current.items():
+        prev = lows.get(key)
+        days = c.execute("SELECT COUNT(DISTINCT date(seen)) FROM snapshots WHERE dest=?", (key,)).fetchone()[0]
+        if key in skip or prev is None or days < NEW_LOW_MIN_DAYS or price > prev - NEW_LOW_MIN:
+            continue
+        name, code = names[key]
+        log(f"new all-time low: {name} ${price:.0f} pp (was ${prev:.0f})")
+        out.append(dict(name=name, price=price, prev=prev, depart=dep, ret=ret, origin=origin,
+                        link=gflights(origin, code, dep, ret)))
+    return out
+
+
 def main():
     if not MOCK and not API_KEY:
         sys.exit("Set IGNAV_API_KEY (or MOCK=1 to test).")
@@ -513,9 +711,10 @@ def main():
     log(f"{STAY_DAYS}-night trips leaving {pretty(start.isoformat())} to {pretty(end.isoformat())}, "
         f"back by {pretty(TRIP_END.isoformat())}, {stops_label()}")
     routes = [(g, d) for g in GROUPS for d in g["dests"]]
+    names = {rkey(g, d[0]): (d[1] if g["key"] == HOME else f"{d[1]} from DC", d[0]) for g, d in routes}
     for g, (code, city, seed) in routes:
         key = rkey(g, code)
-        name = city if g["key"] == HOME else f"{city} from DC"
+        name = names[key][0]
         try:
             dates = cheapest_dates(g, code, seed, STAY_DAYS)
         except Exception as e:
@@ -562,6 +761,11 @@ def main():
                           tier=tier, pct=round(100 * (1 - ratio)), depart=dep, ret=ret, airline=airline,
                           stops=stops, link=link, others=others, trusted=trusted))
 
+    c.executemany("INSERT INTO snapshots(dest, price, depart, origin) VALUES (?,?,?,?)",
+                  [(k, v[2], v[0], v[3]) for k, v in current.items()])
+    c.commit()
+    new_lows = find_new_lows(c, current, {d["key"] for d in found}, names)
+
     try:
         build_site(c, current)
     except Exception as e:            # the page is a bonus; never block alerts
@@ -573,6 +777,12 @@ def main():
             c.executemany("INSERT INTO alerts(dest, price) VALUES (?,?)", [(d["key"], d["price"]) for d in found])
     else:
         log("no new deals")
+    if new_lows:
+        try:
+            send_new_lows(new_lows)
+        except Exception as e:
+            log(f"new-low email failed: {e}")
+    maybe_digest(c, current)
     c.execute("DELETE FROM prices WHERE seen < datetime('now', ?)", (f"-{HISTORY_DAYS} days",))
     c.commit()
     c.close()

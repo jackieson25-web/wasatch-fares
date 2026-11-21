@@ -37,6 +37,7 @@ HOMES = {
 }
 DEFAULT_AIRPORT = {"Salt Lake City": "SLC", "Washington D.C.": "IAD"}   # when a post names no airport
 MAX_AGE_HOURS = 48        # The Flight Deal: posts older than ~2 days are usually gone
+ADULTS = int(os.environ.get("ADULTS", "2"))   # Jack + wife: check that 2 seats exist at the price
 CONFIRM_SLACK = 1.10      # Ignav within 10% of the posted price counts as confirmed
 FEED_FAIL_ALERT = 6       # email once after this many failed checks in a row (~3 hours)
 
@@ -170,8 +171,8 @@ def ignav_allowed():
 
 
 def ignav_price(origin, dest, depart, ret):
-    """Cheapest live round-trip fare for the sample dates (1 billed request), or None."""
-    body = {"origin": origin, "destination": dest, "market": "US",
+    """Cheapest live round-trip fare PER PERSON for 2 seats on the sample dates (1 billed request), or None."""
+    body = {"origin": origin, "destination": dest, "market": "US", "adults": ADULTS,
             "departure_date": depart.isoformat(), "return_date": ret.isoformat()}
     for attempt in range(3):
         req = Request("https://ignav.com/api/fares/round-trip", data=json.dumps(body).encode(),
@@ -179,7 +180,8 @@ def ignav_price(origin, dest, depart, ret):
         try:
             with urlopen(req, timeout=90) as r:
                 its = json.load(r).get("itineraries", [])
-            prices = [float(i["price"]["amount"]) for i in its if i.get("price")]
+            # Searched for 2 seats; the price is the party total, so compare per person.
+            prices = [float(i["price"]["amount"]) / ADULTS for i in its if i.get("price")]
             return min(prices) if prices else None
         except HTTPError as e:
             if e.code not in (424, 429, 500, 502, 503) or attempt == 2:

@@ -9,8 +9,15 @@ check it also publishes a page showing the lowest price found for each city.
 - **From SLC:** Dublin, Warsaw, Shanghai, Lima, Buenos Aires (1 stop max, 2 for Shanghai). Fixed "usual" fares of $725 / $850 / $1,000 / $1,000 / $1,325; an alert fires at 30% under ($508 / $595 / $700 / $700 / $928)
 - **From DCA/IAD:** Dublin, Warsaw, Cairo (1 stop max). Fixed "usual" fares of $700 / $760 / $900, so an alert fires at 30% under ($490 / $532 / $630)
 - **Checks:** 4 times a day on GitHub Actions
+- **Travelers:** 2 adults. Every search asks for 2 seats; prices are shown per person (and the total for 2), and the "usual" fares and alert thresholds are per person.
 - **Alerts:** Great deal = 30%+ below usual; Scorching deal = 50%+ below usual (🔥 in the email subject).
   A city stays quiet for 7 days after an alert unless it gets 10% cheaper.
+
+## Other emails and the page
+
+- **New all-time low:** one email when a city beats its lowest price so far by $15+ per person (starts after 7 days of checks).
+- **Weekly summary:** Sunday morning (first run after 6 AM MT): every city's price, its all-time low, and the change from a week ago.
+- **Page:** a 60-day trend line per city (hover for each day's price), and a warning banner if prices haven't updated in 12+ hours.
 
 ## Ignav price guard (price_guard.py)
 
