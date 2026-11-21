@@ -10,6 +10,10 @@ on:
         description: "Test only: max stops to try (leave blank for a normal check). Test runs send no email and don't touch the page."
         required: false
         default: ""
+      test_digest:
+        description: "Test only: check fresh prices and email the weekly summary to the sending Gmail address only. No other emails; page and history untouched."
+        type: boolean
+        default: false
 
 concurrency:
   group: fare-watch
@@ -43,7 +47,7 @@ jobs:
           restore-keys: fares-db-
 
       - name: Check fares
-        if: inputs.test_max_stops == ''
+        if: inputs.test_max_stops == '' && !inputs.test_digest
         env:
           IGNAV_API_KEY: ${{ secrets.IGNAV_API_KEY }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
@@ -60,8 +64,19 @@ jobs:
           SITE_DIR: /tmp/site
         run: python watch.py
 
+      - name: Test weekly summary (to SMTP_USER only)
+        if: inputs.test_digest
+        env:
+          IGNAV_API_KEY: ${{ secrets.IGNAV_API_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          TEST_DIGEST: "1"
+          DB_PATH: /tmp/digest.db
+          SITE_DIR: /tmp/site
+        run: python watch.py
+
       - name: Save price history
-        if: always() && inputs.test_max_stops == ''
+        if: always() && inputs.test_max_stops == '' && !inputs.test_digest
         uses: actions/cache/save@v4
         with:
           path: data
