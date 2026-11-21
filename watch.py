@@ -756,7 +756,7 @@ def open_jaw_rows(c, g, current):
             rt_out = current.get(rkey(g, home_from), (None, None, None))[2]
             vs = []
             if rt_in:
-                vs.append(f"{money(price - rt_in)} {'more' if price >= rt_in else 'less'} than a round trip to {cities[into]}"
+                vs.append(f"{money(abs(price - rt_in))} {'more' if price >= rt_in else 'less'} than a round trip to {cities[into]}"
                           if abs(price - rt_in) >= 5 else f"about the same as a round trip to {cities[into]}")
             if rt_out:
                 vs.append(f"{cities[home_from]} round trip is {money(rt_out)}")
