@@ -139,7 +139,7 @@ OPEN_JAW_COMBOS = {f"{g}:{x}-{y}" for g, a, b in OPEN_JAW for x, y in ((a, b), (
 TRIPS = [dict(key="DC-MADEIRA", group="DC", name="Lisbon + Madeira from DC", code="LIS", code2="FNC",
               legs=[("LIS", "Lisbon", 2), ("FNC", "Madeira", 4)],
               start=date(2027, 6, 1), end=date(2027, 6, 30),
-              usual=1100)]          # PROVISIONAL usual fare per person, set from first live check
+              usual=1210)]          # usual = first live price 11-22 ($1,207 pp: Jun 8-14, $1,140 ticket + $66 hop)
 TRIP_SAMPLE = 4
 GREAT_TRIP = 0.70                   # same 30%-under rule as the city routes
 TRIP_LINKS = {}                     # route key -> Google Flights link for trips (filled each run)
