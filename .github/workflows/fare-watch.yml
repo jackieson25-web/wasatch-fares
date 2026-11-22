@@ -28,7 +28,7 @@ permissions:
 jobs:
   watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 25      # the once-a-day all-lengths + two-city run takes ~8 min
+    timeout-minutes: 40      # the once-a-day big run takes ~8 min, but ~17+ when Ignav is slow (11-22)
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
