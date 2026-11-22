@@ -131,6 +131,18 @@ CLIMB_STEP = 50
 OPEN_JAW = [(HOME, "DUB", "WAW"), ("DC", "DUB", "WAW"), (HOME, "BER", "WAW"), ("DC", "BER", "WAW")]   # Lima/Buenos Aires dropped 11-21 (Jack)
 OPEN_JAW_DATES = 3
 OPEN_JAW_COMBOS = {f"{g}:{x}-{y}" for g, a, b in OPEN_JAW for x, y in ((a, b), (b, a))}
+
+# Multi-stop trips (Jack, 11-22): home -> stop 1 (n nights) -> stop 2 (m nights) -> home.
+# Ignav prices at most 2 flights per search, so each trip = one open-jaw ticket (home -> stop 1,
+# stop 2 -> home) + a separate one-way hop stop 1 -> stop 2. Checked every run, on the TRIP_SAMPLE
+# cheapest departure dates of the home <-> stop 1 round-trip calendar (~6 requests a run).
+TRIPS = [dict(key="DC-MADEIRA", group="DC", name="Lisbon + Madeira from DC", code="LIS", code2="FNC",
+              legs=[("LIS", "Lisbon", 2), ("FNC", "Madeira", 4)],
+              start=date(2027, 6, 1), end=date(2027, 6, 30),
+              usual=1100)]          # PROVISIONAL usual fare per person, set from first live check
+TRIP_SAMPLE = 4
+GREAT_TRIP = 0.70                   # same 30%-under rule as the city routes
+TRIP_LINKS = {}                     # route key -> Google Flights link for trips (filled each run)
 # Test mode: fresh prices, then ONLY the weekly summary, sent to SMTP_USER alone with [TEST].
 TEST_DIGEST = os.environ.get("TEST_DIGEST") == "1"
 
@@ -309,6 +321,8 @@ def db():
     -- latest price for every departure date and trip length (feeds the date grid + flex lengths)
     CREATE TABLE IF NOT EXISTS calendar (dest TEXT, depart TEXT, ret TEXT, price REAL, origin TEXT,
                                          seen TEXT DEFAULT (datetime('now')));
+    CREATE TABLE IF NOT EXISTS trips (key TEXT PRIMARY KEY, depart TEXT, ret TEXT, price REAL, origin TEXT,
+                                      main REAL, hop REAL, hop_date TEXT, seen TEXT DEFAULT (datetime('now')));
     CREATE TABLE IF NOT EXISTS openjaw (combo TEXT PRIMARY KEY, depart TEXT, ret TEXT, price REAL,
                                         origin TEXT, rt_price REAL, seen TEXT DEFAULT (datetime('now')));
     """)
@@ -499,6 +513,24 @@ def send_digest(c, current):
         text.append(f"Two-city {gkey} into {into}, home from {home_from}: ${price:.0f} pp")
     if oj:
         sections.append('<h3 style="font-size:15px;margin:18px 0 8px">Two-city trips</h3>' + "".join(oj))
+    tr = []
+    for t in TRIPS:
+        if t["key"] not in current:
+            continue
+        dep, ret, price, origin = current[t["key"]]
+        diff = week_change(c, t["key"], price)
+        if diff is not None:
+            moved.append(diff)
+        lp = lows.get(t["key"], price)
+        low = "at its all-time low" if price - lp < 1 else f"all-time low {money(lp)}"
+        hop_date = (c.execute("SELECT hop_date FROM trips WHERE key=?", (t["key"],)).fetchone() or [dep])[0]
+        tr.append(card(f"{escape(t['name'])} · {money(price)} per person",
+                       [f"{money(price * ADULTS)} for {ADULTS} · {change_words(diff)} · {low}",
+                        f"{pretty(dep)} – {pretty(ret)} from {origin}"],
+                       trip_link(t, origin, dep, hop_date, ret), "#e9a23b"))
+        text.append(f"{t['name']}: {money(price)} pp, {change_words(diff)}, {low}")
+    if tr:
+        sections.append('<h3 style="font-size:15px;margin:18px 0 8px">Multi-stop trips</h3>' + "".join(tr))
     if not sections:
         return False
     downs, ups = sum(1 for d in moved if d <= -5), sum(1 for d in moved if d >= 5)
@@ -604,7 +636,7 @@ def find_climbs(c, current, names):
         name, code = names[key]
         log(f"price climbing: {name} ${price:.0f} pp vs 14-day low ${low[0]:.0f} on {low[1]}")
         out.append(dict(key=key, name=name, price=price, low=low[0], low_day=low[1], depart=dep, ret=ret,
-                        origin=origin, link=gflights(origin, code, dep, ret)))
+                        origin=origin, link=TRIP_LINKS.get(key) or gflights(origin, code, dep, ret)))
     return out
 
 
@@ -688,6 +720,104 @@ def check_open_jaws(c, current):
                 log(f"two-city {combo}: ${best[2]:.0f} pp {best[0]}..{best[1]}"
                     + (f" (round trip to {into} ${rt_now:.0f})" if rt_now else ""))
     c.commit()
+
+
+def trip_link(t, origin, dep, hop_date, ret):
+    (a, _, _), (b, _, _) = t["legs"]
+    return ("https://www.google.com/travel/flights?q=" +
+            quote(f"Flights from {origin} to {a} on {dep}, {a} to {b} on {hop_date}, {b} to {origin} on {ret} "
+                  f"for {ADULTS} adults"))
+
+
+def priced(data):
+    return [(d["departure_date"], per_person(d["price"]["amount"])) for d in data.get("dates", [])
+            if d.get("status") == "priced" and d.get("price")]
+
+
+def check_trip(c, t):
+    """Cheapest per-person total for a multi-stop trip, or None.
+    Returns (depart, return, total, airport, main ticket, hop, hop date)."""
+    g = next(x for x in GROUPS if x["key"] == t["group"])
+    (a, _, n1), (b, _, n2) = t["legs"]
+    total = n1 + n2
+    lo = max(t["start"], date.today() + timedelta(days=1))
+    hi = min(t["end"] - timedelta(days=total), lo + timedelta(days=30))   # 31 dates per request
+    if lo > hi:
+        return None
+    if MOCK:
+        r = random.Random(f"{t['key']}{date.today()}")
+        rt = sorted(((lo + timedelta(days=i)).isoformat(), round(950 * r.uniform(0.9, 1.25)))
+                    for i in range((hi - lo).days + 1))
+        hops = {(lo + timedelta(days=i + n1)).isoformat(): round(r.uniform(55, 130))
+                for i in range((hi - lo).days + 1)}
+    else:
+        body = {"market": "US", "adults": ADULTS, "max_stops": stops_for(g, a)}
+        rt = priced(api("/api/fares/cheapest-dates", {**body, "origin": g["origins"][0], "destination": a,
+                         "stay_days": total, "departure_date_range": {"start": lo.isoformat(), "end": hi.isoformat()}}))
+        hops = dict(priced(api("/api/fares/cheapest-dates", {**body, "origin": a, "destination": b,
+                    "departure_date_range": {"start": (lo + timedelta(days=n1)).isoformat(),
+                                             "end": (hi + timedelta(days=n1)).isoformat()}})))
+    best = None
+    for dep, _ in sorted(rt, key=lambda x: x[1])[:TRIP_SAMPLE]:
+        d0 = date.fromisoformat(dep)
+        hop_date, ret = (d0 + timedelta(days=n1)).isoformat(), (d0 + timedelta(days=total)).isoformat()
+        if hop_date not in hops:
+            continue
+        if MOCK:
+            main_p, airport = round(dict(rt)[dep] * 1.08), "IAD"
+        else:
+            try:
+                res = open_jaw_search(g, a, b, dep, ret)
+            except RuntimeError as e:
+                log(f"  {t['key']} {dep}: {str(e)[:120]}")
+                continue
+            if not res:
+                continue
+            main_p, airport = res
+        tot = main_p + hops[hop_date]
+        if best is None or tot < best[2]:
+            best = (dep, ret, tot, airport, main_p, hops[hop_date], hop_date)
+    if best:
+        c.execute("INSERT OR REPLACE INTO trips(key, depart, ret, price, origin, main, hop, hop_date, seen) "
+                  "VALUES (?,?,?,?,?,?,?,?, datetime('now'))", (t["key"], *best))
+        c.commit()
+    return best
+
+
+def trip_rows(c, current, lows):
+    rows = []
+    for t in TRIPS:
+        key = t["key"]
+        row = c.execute("SELECT depart, ret, price, origin, main, hop, hop_date FROM trips WHERE key=?", (key,)).fetchone()
+        if not row:
+            continue
+        dep, ret, price, origin, main_p, hop_p, hop_date = row
+        cur = key in current
+        (a, an, n1), (b, bn, n2) = t["legs"]
+        lp = lows.get(key, (price, dep, ret, date.today().isoformat(), origin))
+        low = ('<span class="now"><b>All-time low</b></span>' if price - lp[0] < 1 else
+               f'<span class="now">All-time low {money(lp[0])} · {pretty(lp[1])} · found {pretty(lp[3])}</span>')
+        if not cur:
+            low = '<span class="now">Not checked this time</span>'
+        moved = change_words(week_change(c, key, price)) if cur else ""
+        rows.append(f"""
+      <li class="row">
+        <span class="code">{a}<small>+{b}</small></span>
+        <div class="mid"><div class="city">{escape(t['name'])}</div>
+          <div class="dates">From {origin} · {pretty(dep)} – {pretty(ret)} · {n1} nights {escape(an)}, {n2} nights {escape(bn)}</div>
+          <div class="trend">DC → {escape(an)} and {escape(bn)} → DC on one ticket, {money(main_p)}; plus {escape(an)} → {escape(bn)} on {pretty(hop_date)}, {money(hop_p)} (separate ticket). Per person.</div>
+          <div class="chart">{sparkline(daily(c, key), price)}</div></div>
+        <div class="right"><span class="price">{money(price)}</span><span class="pp">per person · {money(price * ADULTS)} for {ADULTS}</span>{low}<span class="now">{moved}</span></div>
+        <a class="check" href="{escape(trip_link(t, origin, dep, hop_date, ret))}" target="_blank" rel="noopener">Check this trip on Google Flights</a>
+      </li>""")
+    if not rows:
+        return ""
+    return f"""
+<section aria-labelledby="trips">
+  <div class="head"><h2 id="trips">Multi-stop trips <span class="sub">June 2027 · the {TRIP_SAMPLE} cheapest departure dates are priced each check</span></h2></div>
+  <ol class="board">{''.join(rows)}
+  </ol>
+</section>"""
 
 
 def gflights_multi(origin, into, home_from, depart, ret):
@@ -842,6 +972,7 @@ def build_site(c, current):
   {f'<h3 class="ojh">Two-city trips from {escape(g["label"])}</h3><ol class="board">{oj}</ol>' if oj else ''}
 </section>""")
 
+    sections.append(trip_rows(c, current, lows))
     html = PAGE.format(
         stay=STAY_LABEL, start=pretty(start.isoformat()), end=pretty(end.isoformat()),
         home_by=pretty(TRIP_END.isoformat()), stamp=stamp, sections="".join(sections),
@@ -975,7 +1106,7 @@ def find_new_lows(c, current, skip, names):
         name, code = names[key]
         log(f"new all-time low: {name} ${price:.0f} pp (was ${prev:.0f})")
         out.append(dict(name=name, price=price, prev=prev, depart=dep, ret=ret, origin=origin,
-                        link=gflights(origin, code, dep, ret)))
+                        link=TRIP_LINKS.get(key) or gflights(origin, code, dep, ret)))
     return out
 
 
@@ -1056,6 +1187,35 @@ def main():
         found.append(dict(key=key, dest=code, origin=origin, name=name, price=price, normal=round(normal),
                           tier=tier, pct=round(100 * (1 - ratio)), depart=dep, ret=ret, airline=airline,
                           stops=stops, link=link, others=others, trusted=trusted))
+
+    for t in TRIPS:
+        key = t["key"]
+        try:
+            res = check_trip(c, t)
+        except Exception as e:            # bonus feature; never block the rest
+            log(f"{t['name']}: failed: {e}")
+            continue
+        if not res:
+            log(f"{t['name']}: no price this time")
+            continue
+        dep, ret, price, origin, main_p, hop_p, hop_date = res
+        current[key] = (dep, ret, price, origin)
+        names[key] = (t["name"], t["code"])
+        TRIP_LINKS[key] = link = trip_link(t, origin, dep, hop_date, ret)
+        ratio = price / t["usual"]
+        tier = "Scorching deal" if ratio <= SCORCHING else "Great deal" if ratio <= GREAT_TRIP else None
+        log(f"{origin}-{t['code']}+{t['code2']} {pretty(dep):10} ${price:>5.0f} pp (ticket ${main_p:.0f} + hop ${hop_p:.0f} "
+            f"on {hop_date})  normal ~${t['usual']}  {round(100 * (1 - ratio)):>3}% off  {tier or ''}")
+        if not tier:
+            continue
+        prev = c.execute("SELECT MIN(price) FROM alerts WHERE dest=? AND sent >= datetime('now', ?)",
+                         (key, f"-{REALERT_DAYS} days")).fetchone()[0]
+        if prev is not None and price > prev * 0.9:
+            log(f"  already alerted at ${prev:.0f} recently, skipping")
+            continue
+        found.append(dict(key=key, dest=f"{t['code']}+{t['code2']}", origin=origin, name=t["name"], price=price,
+                          normal=t["usual"], tier=tier, pct=round(100 * (1 - ratio)), depart=dep, ret=ret,
+                          airline=None, stops=None, link=link, others=[], trusted=True))
 
     c.executemany("INSERT INTO snapshots(dest, price, depart, origin) VALUES (?,?,?,?)",
                   [(k, v[2], v[0], v[3]) for k, v in current.items()])

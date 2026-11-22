@@ -99,8 +99,8 @@ def allowed(state_dir, notify=True, rate_fn=fetch_rate):
                    "To approve the new price, tell Claude \"approve the Ignav price\", or edit "
                    "price_guard.py in the wasatch-fares repo on GitHub and change the 2.00 in the "
                    f"APPROVED_PER_1K line to {rate:.2f}. The next run picks it up.\n\n"
-                   f"At the new price, the usual ~5,000 requests a month would cost about "
-                   f"${rate * 5.0:.2f} a month.")
+                   f"At the new price, the usual ~5,700 requests a month would cost about "
+                   f"${rate * 5.7:.2f} a month.")
             state["alerted_rate"] = rate
         state["blocked_since"] = state.get("blocked_since") or now
     else:
