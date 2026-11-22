@@ -118,7 +118,7 @@ NEW_LOW_MIN_DAYS = 7      # days of checks for a city before new-low emails star
 DIGEST_WEEKDAY = 6        # Sunday (Mountain time): weekly summary email
 DIGEST_HOUR = 6           # first run on Sunday at/after 6 AM MT sends it
 PAGE_URL = "https://jackieson25-web.github.io/wasatch-fares/"
-STALE_HOURS = 12          # page shows a warning if it hasn't updated in this long
+STALE_HOURS = 16          # page warns if not updated this long (checks are 12 h apart, GitHub can start late)
 
 # Rising-price warning: email when a city is this far above its 14-day low (after 7 days of data).
 CLIMB_MIN = 60            # $ per person...
@@ -845,7 +845,7 @@ def build_site(c, current):
     html = PAGE.format(
         stay=STAY_LABEL, start=pretty(start.isoformat()), end=pretty(end.isoformat()),
         home_by=pretty(TRIP_END.isoformat()), stamp=stamp, sections="".join(sections),
-        hours="4 times a day", adults=ADULTS, updated_ms=updated_ms, stale_hours=STALE_HOURS)
+        hours="twice a day", adults=ADULTS, updated_ms=updated_ms, stale_hours=STALE_HOURS)
     SITE.mkdir(parents=True, exist_ok=True)
     (SITE / "index.html").write_text(html, encoding="utf-8")
     log(f"page written to {SITE / 'index.html'}")
