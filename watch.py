@@ -142,7 +142,7 @@ OPEN_JAW_COMBOS = {f"{g}:{x}-{y}" for g, a, b in OPEN_JAW for x, y in ((a, b), (
 TRIPS = [dict(key="DC-MADEIRA", group="DC", name="Madeira from DC", code="FNC", code2=None,
               legs=[("FNC", "Madeira", 6)],
               start=date(2027, 6, 1), end=date(2027, 6, 30),
-              usual=900)]           # PROVISIONAL usual fare per person, set from first live check
+              usual=1130)]          # first live price 11-22: $1,125 pp (Jun 9-15); alert at <= $791
 TRIP_SAMPLE = 4                     # 2-stop trips: dates priced per check
 TRIP_SAMPLE_RT = 2                  # round trips: cheapest dates rechecked to rule out BWI
 GREAT_TRIP = 0.70                   # same 30%-under rule as the city routes
