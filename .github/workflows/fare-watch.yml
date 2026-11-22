@@ -90,8 +90,9 @@ jobs:
           path: site
 
       # GitHub sometimes can't find the just-uploaded page ("No artifacts named github-pages",
-      # 11-21 and 11-22). Its error says to retry later, so: try, wait a minute, try once more.
-      # The run only fails (and emails) if both tries fail.
+      # 11-21 and 11-22). Its error says to retry later: 3 tries over ~4 minutes. Publishing never
+      # fails the run (Jack doesn't want failure emails for it); the fare checks and alert emails
+      # have already happened by now, and the page's stale banner shows if publishing keeps failing.
       - name: Publish page
         id: deploy
         if: hashFiles('site/index.html') != ''
@@ -102,7 +103,22 @@ jobs:
         if: hashFiles('site/index.html') != '' && steps.deploy.outcome == 'failure'
         run: sleep 60
 
-      - name: Publish page (retry)
+      - name: Publish page (retry 1)
         id: deploy_retry
         if: hashFiles('site/index.html') != '' && steps.deploy.outcome == 'failure'
+        continue-on-error: true
         uses: actions/deploy-pages@v5
+
+      - name: Wait before last publish try
+        if: hashFiles('site/index.html') != '' && steps.deploy_retry.outcome == 'failure'
+        run: sleep 180
+
+      - name: Publish page (retry 2)
+        id: deploy_retry2
+        if: hashFiles('site/index.html') != '' && steps.deploy_retry.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/deploy-pages@v5
+
+      - name: Note if the page didn't publish
+        if: hashFiles('site/index.html') != '' && steps.deploy_retry2.outcome == 'failure'
+        run: echo "::warning::Page publish failed 3 times (GitHub Pages hiccup). Fares were still checked and emails sent; the page updates on the next run."
