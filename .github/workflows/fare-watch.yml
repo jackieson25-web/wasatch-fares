@@ -32,15 +32,15 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       # Price history lives in the Actions cache between runs.
       - name: Restore price history
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: data
           key: fares-db-${{ github.run_id }}
@@ -77,18 +77,31 @@ jobs:
 
       - name: Save price history
         if: always() && inputs.test_max_stops == '' && !inputs.test_digest
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: data
           key: fares-db-${{ github.run_id }}
 
       - name: Upload page
         if: hashFiles('site/index.html') != ''
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
+      # GitHub sometimes can't find the just-uploaded page ("No artifacts named github-pages",
+      # 11-21 and 11-22). Its error says to retry later, so: try, wait a minute, try once more.
+      # The run only fails (and emails) if both tries fail.
       - name: Publish page
         id: deploy
         if: hashFiles('site/index.html') != ''
-        uses: actions/deploy-pages@v4
+        continue-on-error: true
+        uses: actions/deploy-pages@v5
+
+      - name: Wait before retrying publish
+        if: hashFiles('site/index.html') != '' && steps.deploy.outcome == 'failure'
+        run: sleep 60
+
+      - name: Publish page (retry)
+        id: deploy_retry
+        if: hashFiles('site/index.html') != '' && steps.deploy.outcome == 'failure'
+        uses: actions/deploy-pages@v5

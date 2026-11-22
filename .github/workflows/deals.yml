@@ -26,15 +26,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       # Which posts were already handled lives in the Actions cache between runs.
       - name: Restore seen posts
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: deals-data
           key: deals-state-${{ github.run_id }}
@@ -53,7 +53,7 @@ jobs:
 
       - name: Save seen posts
         if: always() && !inputs.dry_run && !inputs.test_email
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: deals-data
           key: deals-state-${{ github.run_id }}
