@@ -22,8 +22,9 @@ check it also publishes a page showing the lowest price found for each city.
 - **Prices climbing:** one email when a city is $60+ (or 8%+) above its 14-day low, after 7 days of checks; then quiet for a week unless it climbs another $50.
 - **Two-city trips:** once a day, fly into one city and home from the other (Dublin/Warsaw and Berlin/Warsaw, from both SLC and DC), both directions, on the 3 cheapest dates. Shown on the page and in the weekly summary. Getting between the two cities is up to you.
 - **Date grid:** tap "Every departure date" under any city to see the cheapest trip leaving each day, shaded cheaper to pricier.
-- **Lisbon + Madeira from DC:** 6 nights in June 2027 (2 in Lisbon, 4 in Madeira), checked every run. Priced as one ticket DC → Lisbon + Madeira → DC plus a separate Lisbon → Madeira one-way, on the 4 cheapest departure dates. It alerts at 30% under its usual fare, like the cities.
-- **Cost:** about 5,700 Ignav requests a month (~$11.50).
+- **Madeira from DC:** 6-night round trip in June 2027 (DCA/IAD, not BWI), checked every run: one calendar scan, then the 2 cheapest dates rechecked. It alerts at 30% under its usual fare, like the cities. (Tried Lisbon 2 + Madeira 4 first; the stopover ticket cost too much.)
+- **Speed:** Ignav searches run 6 at a time, so even the daily big run finishes in a few minutes when Ignav is slow.
+- **Cost:** about 5,300 Ignav requests a month (~$10.60).
 
 ## Ignav price guard (price_guard.py)
 

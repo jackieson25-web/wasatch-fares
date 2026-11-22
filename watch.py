@@ -24,6 +24,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import price_guard
+from concurrent.futures import ThreadPoolExecutor
 from urllib.error import HTTPError
 
 # ---------------------------------------------------------------- settings
@@ -136,11 +137,14 @@ OPEN_JAW_COMBOS = {f"{g}:{x}-{y}" for g, a, b in OPEN_JAW for x, y in ((a, b), (
 # Ignav prices at most 2 flights per search, so each trip = one open-jaw ticket (home -> stop 1,
 # stop 2 -> home) + a separate one-way hop stop 1 -> stop 2. Checked every run, on the TRIP_SAMPLE
 # cheapest departure dates of the home <-> stop 1 round-trip calendar (~6 requests a run).
-TRIPS = [dict(key="DC-MADEIRA", group="DC", name="Lisbon + Madeira from DC", code="LIS", code2="FNC",
-              legs=[("LIS", "Lisbon", 2), ("FNC", "Madeira", 4)],
+# 11-22: started as Lisbon (2) + Madeira (4) = $1,207 pp ($1,140 ticket + $66 hop); Jack: the Lisbon
+# stopover is too expensive, so it's now a plain 6-night DC <-> Madeira round trip.
+TRIPS = [dict(key="DC-MADEIRA", group="DC", name="Madeira from DC", code="FNC", code2=None,
+              legs=[("FNC", "Madeira", 6)],
               start=date(2027, 6, 1), end=date(2027, 6, 30),
-              usual=1210)]          # usual = first live price 11-22 ($1,207 pp: Jun 8-14, $1,140 ticket + $66 hop)
-TRIP_SAMPLE = 4
+              usual=900)]           # PROVISIONAL usual fare per person, set from first live check
+TRIP_SAMPLE = 4                     # 2-stop trips: dates priced per check
+TRIP_SAMPLE_RT = 2                  # round trips: cheapest dates rechecked to rule out BWI
 GREAT_TRIP = 0.70                   # same 30%-under rule as the city routes
 TRIP_LINKS = {}                     # route key -> Google Flights link for trips (filled each run)
 # Test mode: fresh prices, then ONLY the weekly summary, sent to SMTP_USER alone with [TEST].
@@ -149,6 +153,23 @@ TEST_DIGEST = os.environ.get("TEST_DIGEST") == "1"
 
 def log(*a):
     print(datetime.now().strftime("%H:%M:%S"), *a, flush=True)
+
+
+WORKERS = int(os.environ.get("WORKERS", "6"))   # Ignav searches run this many at a time
+
+
+def fetch_all(jobs):
+    """Run independent Ignav lookups in parallel. jobs: [(key, fn, args)].
+    Returns {key: (result, error)}; one failure never stops the others."""
+    out = {}
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        futs = {k: ex.submit(fn, *a) for k, fn, a in jobs}
+        for k, f in futs.items():
+            try:
+                out[k] = (f.result(), None)
+            except Exception as e:
+                out[k] = (None, e)
+    return out
 
 
 def per_person(amount):
@@ -530,7 +551,7 @@ def send_digest(c, current):
                        trip_link(t, origin, dep, hop_date, ret), "#e9a23b"))
         text.append(f"{t['name']}: {money(price)} pp, {change_words(diff)}, {low}")
     if tr:
-        sections.append('<h3 style="font-size:15px;margin:18px 0 8px">Multi-stop trips</h3>' + "".join(tr))
+        sections.append('<h3 style="font-size:15px;margin:18px 0 8px">Other trips</h3>' + "".join(tr))
     if not sections:
         return False
     downs, ups = sum(1 for d in moved if d <= -5), sum(1 for d in moved if d >= 5)
@@ -686,43 +707,54 @@ def open_jaw_search(g, into, home_from, dep, ret):
     return best
 
 
+def mock_open_jaw(combo, dep, rt_price, airport):
+    r = random.Random(combo + dep)
+    return round(rt_price * r.uniform(0.95, 1.3)), airport
+
+
 def check_open_jaws(c, current):
-    """Once a day: both directions of each city pair, on the first city's cheapest dates."""
+    """Once a day: both directions of each city pair, on the first city's cheapest dates.
+    All the searches run in parallel."""
+    plan, jobs = [], []
     for gkey, a, b in OPEN_JAW:
         g = next(x for x in GROUPS if x["key"] == gkey)
         for into, home_from in ((a, b), (b, a)):
             combo = f"{gkey}:{into}-{home_from}"
             rt = sorted(calendar_rows(c, rkey(g, into)), key=lambda x: x[2])
-            seen_deps, tries = set(), []
+            seen_deps = set()
             for dep, ret, price, _ in rt:
-                if dep not in seen_deps:
-                    seen_deps.add(dep)
-                    tries.append((dep, ret, price))
-                if len(tries) == OPEN_JAW_DATES:
+                if dep in seen_deps:
+                    continue
+                seen_deps.add(dep)
+                job = (combo, dep, ret)
+                jobs.append((job, mock_open_jaw, (combo, dep, price, g["origins"][0] if gkey == HOME else "IAD"))
+                            if MOCK else (job, open_jaw_search, (g, into, home_from, dep, ret)))
+                if len(seen_deps) == OPEN_JAW_DATES:
                     break
-            best = None
-            for dep, ret, rt_price in tries:
-                if MOCK:
-                    r = random.Random(combo + dep)
-                    res = (round(rt_price * r.uniform(0.95, 1.3)), g["origins"][0] if gkey == HOME else "IAD")
-                else:
-                    try:
-                        res = open_jaw_search(g, into, home_from, dep, ret)
-                    except RuntimeError as e:
-                        log(f"  two-city {combo} {dep}: {str(e)[:120]}")
-                        continue
-                if res and (best is None or res[0] < best[2]):
-                    best = (dep, ret, res[0], res[1])
-            if best:
-                rt_now = current.get(rkey(g, into), (None, None, None))[2]
-                c.execute("INSERT OR REPLACE INTO openjaw(combo, depart, ret, price, origin, rt_price, seen) "
-                          "VALUES (?,?,?,?,?,?, datetime('now'))", (combo, *best, rt_now))
-                log(f"two-city {combo}: ${best[2]:.0f} pp {best[0]}..{best[1]}"
-                    + (f" (round trip to {into} ${rt_now:.0f})" if rt_now else ""))
+            plan.append((g, gkey, into, home_from, combo))
+    results = fetch_all(jobs)
+    for g, gkey, into, home_from, combo in plan:
+        best = None
+        for (cb, dep, ret), (res, err) in results.items():
+            if cb != combo:
+                continue
+            if err:
+                log(f"  two-city {combo} {dep}: {str(err)[:120]}")
+                continue
+            if res and (best is None or res[0] < best[2]):
+                best = (dep, ret, res[0], res[1])
+        if best:
+            rt_now = current.get(rkey(g, into), (None, None, None))[2]
+            c.execute("INSERT OR REPLACE INTO openjaw(combo, depart, ret, price, origin, rt_price, seen) "
+                      "VALUES (?,?,?,?,?,?, datetime('now'))", (combo, *best, rt_now))
+            log(f"two-city {combo}: ${best[2]:.0f} pp {best[0]}..{best[1]}"
+                + (f" (round trip to {into} ${rt_now:.0f})" if rt_now else ""))
     c.commit()
 
 
 def trip_link(t, origin, dep, hop_date, ret):
+    if len(t["legs"]) == 1:
+        return gflights(origin, t["legs"][0][0], dep, ret)
     (a, _, _), (b, _, _) = t["legs"]
     return ("https://www.google.com/travel/flights?q=" +
             quote(f"Flights from {origin} to {a} on {dep}, {a} to {b} on {hop_date}, {b} to {origin} on {ret} "
@@ -738,6 +770,8 @@ def check_trip(c, t):
     """Cheapest per-person total for a multi-stop trip, or None.
     Returns (depart, return, total, airport, main ticket, hop, hop date)."""
     g = next(x for x in GROUPS if x["key"] == t["group"])
+    if len(t["legs"]) == 1:
+        return check_round_trip(c, t, g)
     (a, _, n1), (b, _, n2) = t["legs"]
     total = n1 + n2
     lo = max(t["start"], date.today() + timedelta(days=1))
@@ -784,6 +818,48 @@ def check_trip(c, t):
     return best
 
 
+def check_round_trip(c, t, g):
+    """One-destination trip with its own dates: calendar scan, then the cheapest dates
+    rechecked with a full search (drops BWI for DC). Same return shape as check_trip."""
+    dest, _, total = t["legs"][0]
+    lo = max(t["start"], date.today() + timedelta(days=1))
+    hi = min(t["end"] - timedelta(days=total), lo + timedelta(days=30))
+    if lo > hi:
+        return None
+    if MOCK:
+        r = random.Random(f"{t['key']}{date.today()}")
+        rt = [((lo + timedelta(days=i)).isoformat(), round(t["usual"] * r.uniform(0.85, 1.2)))
+              for i in range((hi - lo).days + 1)]
+    else:
+        rt = priced(api("/api/fares/cheapest-dates", {
+            "origin": g["origins"][0], "destination": dest, "stay_days": total, "market": "US",
+            "adults": ADULTS, "max_stops": stops_for(g, dest),
+            "departure_date_range": {"start": lo.isoformat(), "end": hi.isoformat()}}))
+    picks = sorted(rt, key=lambda x: x[1])[:TRIP_SAMPLE_RT]
+    best = None
+    for dep, cal_price in picks:
+        ret = (date.fromisoformat(dep) + timedelta(days=total)).isoformat()
+        if MOCK or not g.get("exclude"):
+            price, airport = cal_price, ("IAD" if MOCK else g["origins"][0])
+        else:
+            try:
+                its = round_trip(g, g["origins"][0], dest, dep, ret)
+            except RuntimeError as e:
+                log(f"  {t['key']} {dep}: {str(e)[:120]}")
+                continue
+            if not its:
+                continue
+            price = per_person(its[0]["price"]["amount"])
+            airport = its[0]["outbound"]["segments"][0].get("departure_airport") or g["origins"][0]
+        if best is None or price < best[2]:
+            best = (dep, ret, price, airport, price, None, None)
+    if best:
+        c.execute("INSERT OR REPLACE INTO trips(key, depart, ret, price, origin, main, hop, hop_date, seen) "
+                  "VALUES (?,?,?,?,?,?,?,?, datetime('now'))", (t["key"], *best))
+        c.commit()
+    return best
+
+
 def trip_rows(c, current, lows):
     rows = []
     for t in TRIPS:
@@ -793,19 +869,28 @@ def trip_rows(c, current, lows):
             continue
         dep, ret, price, origin, main_p, hop_p, hop_date = row
         cur = key in current
-        (a, an, n1), (b, bn, n2) = t["legs"]
         lp = lows.get(key, (price, dep, ret, date.today().isoformat(), origin))
         low = ('<span class="now"><b>All-time low</b></span>' if price - lp[0] < 1 else
                f'<span class="now">All-time low {money(lp[0])} · {pretty(lp[1])} · found {pretty(lp[3])}</span>')
         if not cur:
             low = '<span class="now">Not checked this time</span>'
         moved = change_words(week_change(c, key, price)) if cur else ""
+        if len(t["legs"]) == 1:
+            code_html = t["code"]
+            stay_txt = f"{nights(dep, ret)} nights"
+            detail = "Round trip on one ticket, 2 seats, per person."
+        else:
+            (a, an, n1), (b, bn, n2) = t["legs"]
+            code_html = f"{a}<small>+{b}</small>"
+            stay_txt = f"{n1} nights {escape(an)}, {n2} nights {escape(bn)}"
+            detail = (f"DC → {escape(an)} and {escape(bn)} → DC on one ticket, {money(main_p)}; plus {escape(an)} → "
+                      f"{escape(bn)} on {pretty(hop_date)}, {money(hop_p)} (separate ticket). Per person.")
         rows.append(f"""
       <li class="row">
-        <span class="code">{a}<small>+{b}</small></span>
+        <span class="code">{code_html}</span>
         <div class="mid"><div class="city">{escape(t['name'])}</div>
-          <div class="dates">From {origin} · {pretty(dep)} – {pretty(ret)} · {n1} nights {escape(an)}, {n2} nights {escape(bn)}</div>
-          <div class="trend">DC → {escape(an)} and {escape(bn)} → DC on one ticket, {money(main_p)}; plus {escape(an)} → {escape(bn)} on {pretty(hop_date)}, {money(hop_p)} (separate ticket). Per person.</div>
+          <div class="dates">From {origin} · {pretty(dep)} – {pretty(ret)} · {stay_txt}</div>
+          <div class="trend">{detail}</div>
           <div class="chart">{sparkline(daily(c, key), price)}</div></div>
         <div class="right"><span class="price">{money(price)}</span><span class="pp">per person · {money(price * ADULTS)} for {ADULTS}</span>{low}<span class="now">{moved}</span></div>
         <a class="check" href="{escape(trip_link(t, origin, dep, hop_date, ret))}" target="_blank" rel="noopener">Check this trip on Google Flights</a>
@@ -814,7 +899,7 @@ def trip_rows(c, current, lows):
         return ""
     return f"""
 <section aria-labelledby="trips">
-  <div class="head"><h2 id="trips">Multi-stop trips <span class="sub">June 2027 · the {TRIP_SAMPLE} cheapest departure dates are priced each check</span></h2></div>
+  <div class="head"><h2 id="trips">Other trips <span class="sub">June 2027 · {ADULTS} travelers · checked every run</span></h2></div>
   <ol class="board">{''.join(rows)}
   </ol>
 </section>"""
@@ -1129,17 +1214,19 @@ def main():
         f"window {pretty(TRIP_START.isoformat())} to {pretty(TRIP_END.isoformat())}, {stops_label()}")
     routes = [(g, d) for g in GROUPS for d in g["dests"]]
     names = {rkey(g, d[0]): (d[1] if g["key"] == HOME else f"{d[1]} from DC", d[0]) for g, d in routes}
+    cal = fetch_all([((rkey(g, code), stay), cheapest_dates, (g, code, seed, stay))
+                     for g, (code, city, seed) in routes for stay in run_stays
+                     if departure_window(stay)[0] <= departure_window(stay)[1]])
     for g, (code, city, seed) in routes:
         key = rkey(g, code)
         name = names[key][0]
         fresh, failed = [], 0
         for stay in run_stays:
-            if departure_window(stay)[0] > departure_window(stay)[1]:
+            if (key, stay) not in cal:
                 continue
-            try:
-                rows = cheapest_dates(g, code, seed, stay)
-            except Exception as e:
-                log(f"{g['short']}-{code} {stay}n: failed: {e}")
+            rows, err = cal[(key, stay)]
+            if err:
+                log(f"{g['short']}-{code} {stay}n: failed: {err}")
                 failed += 1
                 continue
             save_calendar(c, key, stay, rows)
@@ -1204,8 +1291,10 @@ def main():
         TRIP_LINKS[key] = link = trip_link(t, origin, dep, hop_date, ret)
         ratio = price / t["usual"]
         tier = "Scorching deal" if ratio <= SCORCHING else "Great deal" if ratio <= GREAT_TRIP else None
-        log(f"{origin}-{t['code']}+{t['code2']} {pretty(dep):10} ${price:>5.0f} pp (ticket ${main_p:.0f} + hop ${hop_p:.0f} "
-            f"on {hop_date})  normal ~${t['usual']}  {round(100 * (1 - ratio)):>3}% off  {tier or ''}")
+        how = f"(ticket ${main_p:.0f} + hop ${hop_p:.0f} on {hop_date})" if hop_p else f"{nights(dep, ret)}n round trip"
+        dest_label = f"{t['code']}+{t['code2']}" if t["code2"] else t["code"]
+        log(f"{origin}-{dest_label} {pretty(dep):10} ${price:>5.0f} pp {how}  normal ~${t['usual']}  "
+            f"{round(100 * (1 - ratio)):>3}% off  {tier or ''}")
         if not tier:
             continue
         prev = c.execute("SELECT MIN(price) FROM alerts WHERE dest=? AND sent >= datetime('now', ?)",
@@ -1213,7 +1302,7 @@ def main():
         if prev is not None and price > prev * 0.9:
             log(f"  already alerted at ${prev:.0f} recently, skipping")
             continue
-        found.append(dict(key=key, dest=f"{t['code']}+{t['code2']}", origin=origin, name=t["name"], price=price,
+        found.append(dict(key=key, dest=dest_label, origin=origin, name=t["name"], price=price,
                           normal=t["usual"], tier=tier, pct=round(100 * (1 - ratio)), depart=dep, ret=ret,
                           airline=None, stops=None, link=link, others=[], trusted=True))
 
