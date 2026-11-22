@@ -2,10 +2,9 @@ name: Fare watch
 
 on:
   schedule:
-    # Twice a day, 12 h apart (Jack, 11-22): 13:17 UTC = 6:17 AM Mountain (winter; 7:17 AM in
-    # summer), catching overnight fare loads; 01:17 UTC = 6:17 PM Mountain. The morning run is
-    # the first of the Mountain day, so it also does the 9/11/12-night and two-city checks.
-    - cron: "17 1,13 * * *"
+    # 4 times a day (UTC). 13:17 UTC = 6:17am Mountain in winter. (Tried 2x/day on 11-22;
+    # Jack switched back: the ~$3/mo saving wasn't worth it.)
+    - cron: "17 1,7,13,19 * * *"
   workflow_dispatch:      # adds a "Run workflow" button for manual checks
     inputs:
       test_max_stops:
