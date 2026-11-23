@@ -122,12 +122,28 @@ Vermont Virginia Washington Wisconsin Wyoming""".split()} | {
 GEORGIA_US = {"atlanta", "savannah", "augusta", "columbus", "macon", "albany", "brunswick", "valdosta"}
 
 
+# Jack, 2026-11-23: US places are skipped EXCEPT Hawaii and Puerto Rico.
+US_OK_PLACES = {"hawaii", "puerto rico"}
+US_OK_CITIES = {"honolulu", "kahului", "maui", "kona", "lihue", "kauai", "hilo",
+                "san juan", "aguadilla", "ponce"}
+US_TERRITORIES = {"u.s. virgin islands", "us virgin islands", "virgin islands", "guam",
+                  "northern mariana islands", "american samoa", "usa", "united states"}
+
+
 def is_us(place):
-    """'Los Angeles, California' / 'New York' / 'Washington D.C.' -> True."""
+    """True for US places we don't want ('Fort Myers, Florida', a bare 'Phoenix').
+    Hawaii and Puerto Rico count as not-US (Jack wants those)."""
     parts = [x.strip().lower() for x in place.split(",")]
+    if parts[-1] in US_OK_PLACES or parts[0] in US_OK_CITIES:
+        return False
+    if len(parts) == 1:
+        # The feed writes foreign places as "City, Country"; a bare name is a US
+        # gateway city ("Phoenix" in "Phoenix - Salt Lake City, Utah (and vice versa)").
+        return True
     if parts[-1] == "georgia":         # the US state or the country (Tbilisi, Georgia)
         return parts[0] in GEORGIA_US
-    return parts[-1] in US_STATES or parts[0] in US_STATES or home_of(place) is not None
+    return (parts[-1] in US_STATES or parts[-1] in US_TERRITORIES
+            or parts[0] in US_STATES or home_of(place) is not None)
 
 
 def matches(d):
