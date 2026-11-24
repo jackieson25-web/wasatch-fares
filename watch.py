@@ -522,16 +522,20 @@ def send_digest(c, current):
             sections.append(f'<h3 style="font-size:15px;margin:18px 0 8px">From {escape(g["label"])}</h3>'
                             + "".join(r[1] for r in sorted(rows, key=lambda r: r[0])))
     oj = []
-    for row in c.execute("SELECT combo, depart, ret, price, origin FROM openjaw WHERE seen >= datetime('now', '-3 days') ORDER BY price"):
+    for row in c.execute("SELECT combo, depart, ret, price, origin FROM openjaw WHERE seen >= datetime('now', '-3 days') ORDER BY price").fetchall():
         combo, dep, ret, price, origin = row
         if combo not in OPEN_JAW_COMBOS:   # pairs since removed from OPEN_JAW
             continue
         gkey, pair = combo.split(":")
         into, home_from = pair.split("-")
+        diff = week_change(c, oj_key(combo), price)
+        lp = lows.get(oj_key(combo), price)
+        low = "at its all-time low" if price - lp < 1 else f"all-time low {money(lp)}"
         oj.append(card(f"Into {into}, home from {home_from} · {money(price)} per person",
-                       [f"{money(price * ADULTS)} for {ADULTS} · {pretty(dep)} – {pretty(ret)} from {origin}"],
+                       [f"{money(price * ADULTS)} for {ADULTS} · {change_words(diff)} · {low}",
+                        f"{pretty(dep)} – {pretty(ret)} from {origin}"],
                        gflights_multi(origin, into, home_from, dep, ret), "#e9a23b"))
-        text.append(f"Two-city {gkey} into {into}, home from {home_from}: ${price:.0f} pp")
+        text.append(f"Two-city {gkey} into {into}, home from {home_from}: ${price:.0f} pp, {change_words(diff)}, {low}")
     if oj:
         sections.append('<h3 style="font-size:15px;margin:18px 0 8px">Two-city trips</h3>' + "".join(oj))
     tr = []
@@ -712,6 +716,31 @@ def mock_open_jaw(combo, dep, rt_price, airport):
     return round(rt_price * r.uniform(0.95, 1.3)), airport
 
 
+def oj_key(combo):
+    """History key for a two-city trip in snapshots/lows (kept apart from city codes)."""
+    return f"OJ:{combo}"
+
+
+def log_open_jaw(c, combo, dep, ret, price, origin, seen=None):
+    """Keep every two-city price (chart) and its all-time low (Jack, 2026-11-24)."""
+    key, seen = oj_key(combo), seen or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    c.execute("INSERT INTO snapshots(dest, price, depart, origin, seen) VALUES (?,?,?,?,?)",
+              (key, price, dep, origin, seen))
+    row = c.execute("SELECT price FROM lows WHERE dest=?", (key,)).fetchone()
+    if row is None or price < row[0]:
+        c.execute("INSERT OR REPLACE INTO lows(dest, price, depart, ret, found, origin) VALUES (?,?,?,?,?,?)",
+                  (key, price, dep, ret, seen[:10], origin))
+
+
+def seed_open_jaw_history(c):
+    """One time: start each two-city trip's history from its last saved price."""
+    for combo, dep, ret, price, origin, seen in c.execute(
+            "SELECT combo, depart, ret, price, origin, seen FROM openjaw").fetchall():
+        if not c.execute("SELECT 1 FROM snapshots WHERE dest=? LIMIT 1", (oj_key(combo),)).fetchone():
+            log_open_jaw(c, combo, dep, ret, price, origin, seen)
+    c.commit()
+
+
 def check_open_jaws(c, current):
     """Once a day: both directions of each city pair, on the first city's cheapest dates.
     All the searches run in parallel."""
@@ -747,6 +776,7 @@ def check_open_jaws(c, current):
             rt_now = current.get(rkey(g, into), (None, None, None))[2]
             c.execute("INSERT OR REPLACE INTO openjaw(combo, depart, ret, price, origin, rt_price, seen) "
                       "VALUES (?,?,?,?,?,?, datetime('now'))", (combo, *best, rt_now))
+            log_open_jaw(c, combo, best[0], best[1], best[2], best[3])
             log(f"two-city {combo}: ${best[2]:.0f} pp {best[0]}..{best[1]}"
                 + (f" (round trip to {into} ${rt_now:.0f})" if rt_now else ""))
     c.commit()
@@ -975,13 +1005,23 @@ def open_jaw_rows(c, g, current):
                           if abs(price - rt_in) >= 5 else f"about the same as a round trip to {cities[into]}")
             if rt_out:
                 vs.append(f"{cities[home_from]} round trip is {money(rt_out)}")
+            hop = ("a short flight" if "DUB" in (into, home_from)       # Ireland: sea in the way
+                   else "train, bus or a cheap regional flight")
+            key = oj_key(f"{gkey}:{into}-{home_from}")
+            lrow = c.execute("SELECT price, depart, found FROM lows WHERE dest=?", (key,)).fetchone()
+            if not lrow or price - lrow[0] < 1:
+                low = '<span class="now"><b>All-time low</b></span>'
+            else:
+                low = f'<span class="now">All-time low {money(lrow[0])} · {pretty(lrow[1])} · found {pretty(lrow[2])}</span>'
+            moved = change_words(week_change(c, key, price))
             rows.append((price, f"""
       <li class="row">
         <span class="code">{into}<small>→{home_from}</small></span>
         <div class="mid"><div class="city">Into {escape(cities[into])}, home from {escape(cities[home_from])}</div>
           <div class="dates">From {origin} · {pretty(dep)} – {pretty(ret)} · {nights(dep, ret)} nights</div>
-          <div class="trend">{escape(' · '.join(vs))}. Getting from {escape(cities[into])} to {escape(cities[home_from])} is on you (train, bus or a cheap regional flight).</div></div>
-        <div class="right"><span class="price">{money(price)}</span><span class="pp">per person · {money(price * ADULTS)} for {ADULTS}</span></div>
+          <div class="trend">{escape(' · '.join(vs))}. Getting from {escape(cities[into])} to {escape(cities[home_from])} is on you ({hop}).</div>
+          <div class="chart">{sparkline(daily(c, key), price)}</div></div>
+        <div class="right"><span class="price">{money(price)}</span><span class="pp">per person · {money(price * ADULTS)} for {ADULTS}</span>{low}<span class="now">{moved}</span></div>
         <a class="check" href="{escape(gflights_multi(origin, into, home_from, dep, ret))}" target="_blank" rel="noopener">Check this trip on Google Flights</a>
       </li>"""))
     return "".join(r[1] for r in sorted(rows, key=lambda r: r[0]))
@@ -1005,6 +1045,7 @@ def build_site(c, current):
             c.execute("INSERT OR REPLACE INTO lows(dest, price, depart, ret, found, origin) VALUES (?,?,?,?,?,?)",
                       (key, price, dep, ret, today.date().isoformat(), origin))
     c.commit()
+    seed_open_jaw_history(c)
     lows = {r[0]: r[1:] for r in c.execute("SELECT dest, price, depart, ret, found, origin FROM lows")}
 
     try:
